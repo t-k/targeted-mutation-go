@@ -1,0 +1,8 @@
+Family	Binding	Mode
+extrema	qualified	full
+rounding	aliased	full
+prefix	dot	full
+prefix	shadowed	source-only
+replacement	aliased	source-only
+search	qualified	full
+literal-list	dot	source-only

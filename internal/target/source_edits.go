@@ -69,6 +69,7 @@ func (e *sourceEdits) visit(node ast.Node, ancestors []ast.Node) bool {
 		return false
 	case *ast.BinaryExpr:
 		e.binary(n, parent)
+		e.integerRounding(n)
 	case *ast.UnaryExpr:
 		e.unary(n)
 	case *ast.BasicLit:
@@ -118,6 +119,7 @@ func (e *sourceEdits) visit(node ast.Node, ancestors []ast.Node) bool {
 		e.returns(n, ancestors)
 	case *ast.CallExpr:
 		e.errorf(n)
+		e.semanticCall(n)
 	}
 	return true
 }
