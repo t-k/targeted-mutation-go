@@ -88,4 +88,17 @@ theorem compares_as_false (seen original : BitVec 3) :
 theorem compares_as_true (seen original : BitVec 3) :
     seen &&& (original ^^^ 7#3) = 0#3 ↔ seen &&& original = seen := by bv_decide
 
+theorem masked_value_bits (x mask : BitVec 64) : (x &&& mask) &&& (~~~ mask) = 0#64 := by
+  bv_decide
+
+theorem signed_remainder_bounds (x d : Int) (positive : 0 < d) :
+    -(d - 1) ≤ x.tmod d ∧ x.tmod d ≤ d - 1 := by
+  have lo := Int.lt_tmod_of_pos x positive
+  have hi := Int.tmod_lt_of_pos x positive
+  omega
+
+theorem unsigned_remainder_bounds (x d : Nat) (positive : 0 < d) : x % d ≤ d - 1 := by
+  have bound := Nat.mod_lt x positive
+  omega
+
 end TargetedMutation

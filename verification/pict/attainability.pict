@@ -1,0 +1,5 @@
+Expression: signed-mask, unsigned-mask, signed-remainder, unsigned-remainder, unbounded
+Threshold: inside, outside, hole
+Mode: targeted, conventional
+IF [Threshold] = "hole" THEN [Expression] IN {"signed-mask", "unsigned-mask"};
+IF [Expression] = "unbounded" THEN [Threshold] = "inside";

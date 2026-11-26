@@ -443,6 +443,7 @@ func makeIntegerSite(site *Site, expr *ast.BinaryExpr, fn *ast.FuncDecl, pkg *pa
 			Pivot: analysis.RankSigned(value), Signed: true,
 		}
 	}
+	constrainOperand(site.Domain, variable, pkg.TypesInfo)
 	if id, ok := ast.Unparen(variable).(*ast.Ident); ok && directReturn(fn, expr) {
 		param := fn.Type.Params.List[0].Names[0]
 		if pkg.TypesInfo.Uses[id] == pkg.TypesInfo.Defs[param] {
@@ -450,6 +451,39 @@ func makeIntegerSite(site *Site, expr *ast.BinaryExpr, fn *ast.FuncDecl, pkg *pa
 		}
 	}
 	return true
+}
+
+func constrainOperand(domain *analysis.Domain, expr ast.Expr, info *types.Info) {
+	binary, ok := ast.Unparen(expr).(*ast.BinaryExpr)
+	if !ok {
+		return
+	}
+	value := info.Types[binary.Y].Value
+	if value == nil && binary.Op == token.AND {
+		value = info.Types[binary.X].Value
+	}
+	if value == nil || value.Kind() != constant.Int {
+		return
+	}
+	limit, ok := constant.Uint64Val(value)
+	if !ok {
+		return
+	}
+	if binary.Op == token.AND {
+		bounds := analysis.Attainable{Low: 0, High: limit, ZeroBits: ^limit}
+		if domain.Signed {
+			bounds.Low, bounds.High = analysis.RankSigned(0), analysis.RankSigned(int64(limit))
+		}
+		domain.Attainable = &bounds
+	}
+	if binary.Op == token.REM && limit > 0 {
+		limit--
+		bounds := analysis.Attainable{Low: 0, High: limit}
+		if domain.Signed {
+			bounds.Low, bounds.High = analysis.RankSigned(-int64(limit)), analysis.RankSigned(int64(limit))
+		}
+		domain.Attainable = &bounds
+	}
 }
 
 func stringOperands(expr *ast.BinaryExpr, info *types.Info) bool {

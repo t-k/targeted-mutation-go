@@ -1,0 +1,15 @@
+Expression	Threshold	Mode
+signed-mask	outside	targeted
+unsigned-mask	hole	targeted
+signed-remainder	inside	targeted
+signed-remainder	outside	targeted
+unsigned-remainder	outside	targeted
+unsigned-remainder	outside	conventional
+unbounded	inside	targeted
+signed-mask	inside	conventional
+signed-mask	hole	conventional
+unsigned-mask	outside	conventional
+signed-remainder	outside	conventional
+unsigned-mask	inside	conventional
+unsigned-remainder	inside	targeted
+unbounded	inside	conventional

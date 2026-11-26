@@ -51,6 +51,27 @@ func UnrankSigned(rank uint64) int64 {
 type Domain struct {
 	Low, High, Pivot uint64
 	Signed           bool
+	Attainable       *Attainable
+}
+
+// Attainable bounds the ranks and the set bits of the operand's value.
+type Attainable struct {
+	Low, High uint64
+	ZeroBits  uint64
+}
+
+func (d Domain) Possible(rank uint64) bool {
+	if rank < d.Low || rank > d.High {
+		return false
+	}
+	if d.Attainable == nil {
+		return true
+	}
+	value := rank
+	if d.Signed {
+		value = uint64(UnrankSigned(rank))
+	}
+	return d.Attainable.Low <= rank && rank <= d.Attainable.High && value&d.Attainable.ZeroBits == 0
 }
 
 type Summary struct {
@@ -122,7 +143,9 @@ func Plan(op Operator, domain *Domain, seen Summary, targeted bool) []Candidate 
 		if domain != nil {
 			boundary.Witness = &pivot
 		}
-		candidates = append(candidates, boundary)
+		if !targeted || domain == nil || domain.Possible(pivot) || boundary.Infects(op, seen) {
+			candidates = append(candidates, boundary)
+		}
 	}
 	candidates = append(candidates, Candidate{Kind: "negation", Op: op.Negate(), Pivot: pivot})
 	if !targeted || domain == nil || op.Boundary() == 0 {
@@ -133,13 +156,13 @@ func Plan(op Operator, domain *Domain, seen Summary, targeted bool) []Candidate 
 	if (op == GE || op == LT) && domain.Low < pivot {
 		value := pivot - 1
 		candidate := Candidate{Kind: "threshold", Op: op, Pivot: value, Shift: -1, Witness: &value}
-		if !candidate.Infects(op, seen) {
+		if domain.Possible(value) && !candidate.Infects(op, seen) {
 			candidates = append(candidates, candidate)
 		}
 	} else if (op == GT || op == LE) && pivot < domain.High {
 		value := pivot + 1
 		candidate := Candidate{Kind: "threshold", Op: op, Pivot: value, Shift: 1, Witness: &value}
-		if !candidate.Infects(op, seen) {
+		if domain.Possible(value) && !candidate.Infects(op, seen) {
 			candidates = append(candidates, candidate)
 		}
 	}
