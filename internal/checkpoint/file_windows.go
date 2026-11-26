@@ -19,12 +19,13 @@ func openLocked(path string) (*os.File, error) {
 	if err != nil {
 		return nil, &os.PathError{Op: "open checkpoint", Path: path, Err: err}
 	}
-	// shareMode=0 enforces an OS-level exclusive lock until the handle is closed.
+	// FILE_SHARE_READ blocks any second writer (returning ERROR_SHARING_VIOLATION -> ErrLocked)
+	// while still permitting read-only inspection of the journal file.
 	// FILE_FLAG_OPEN_REPARSE_POINT prevents following symlinks/junctions.
 	handle, err := syscall.CreateFile(
 		pathPtr,
 		syscall.GENERIC_READ|syscall.GENERIC_WRITE,
-		0,
+		syscall.FILE_SHARE_READ,
 		nil,
 		syscall.OPEN_ALWAYS,
 		syscall.FILE_ATTRIBUTE_NORMAL|fileFlagOpenReparsePoint,

@@ -24,7 +24,7 @@ func TestSourceComparisonDoesNotAcceptProbeIOErrorAsSurvival(t *testing.T) {
 }
 
 func TestUnusedRepairIsBoundToTheEditedFile(t *testing.T) {
-	const path = "/tmp/private-overlay/source-0.go"
+	path := filepath.Join(t.TempDir(), "source-0.go")
 	source := []byte("package p\nimport f \"fmt\"\nfunc run() { if x:=3; true {} }\n")
 	diags := []compilerDiagnostic{
 		{path: path, line: 2, column: 8, message: `"fmt" imported as f and not used`},
@@ -39,7 +39,7 @@ func TestUnusedRepairIsBoundToTheEditedFile(t *testing.T) {
 	if repairUnused(source, path, wrongImport) != nil {
 		t.Fatal("diagnostic targeted the wrong import")
 	}
-	diags[1].path = "/tmp/other/source-0.go"
+	diags[1].path = filepath.Join(t.TempDir(), "other-source-0.go")
 	if repairUnused(source, path, diags) != nil {
 		t.Fatal("repair crossed overlay boundaries")
 	}
@@ -96,7 +96,7 @@ func BenchmarkSourceQueue(b *testing.B) {
 }
 
 func TestRepairSelectCaseLocalAfterDeclaration(t *testing.T) {
-	const path = "/tmp/overlay/source-0.go"
+	path := filepath.Join(t.TempDir(), "source-0.go")
 	data := []byte("package p\nfunc f(ch chan int) int { select { case <-ch: x := 42; return 0 } }\n")
 	column := strings.Index(strings.Split(string(data), "\n")[1], "x :=") + 1
 	repair := repairUnused(data, path, []compilerDiagnostic{{path: path, line: 2, column: column, message: "declared and not used: x"}})
@@ -115,7 +115,7 @@ func TestCompilerDiagnosticsSurviveLargeOutput(t *testing.T) {
 }
 
 func TestUnusedVersionedImport(t *testing.T) {
-	const path = "/tmp/overlay/source-0.go"
+	path := filepath.Join(t.TempDir(), "source-0.go")
 	data := []byte("package p\nimport \"math/rand/v2\"\nfunc f() int { return 0 }\n")
 	diag := compilerDiagnostic{path: path, line: 2, column: 8, message: `"math/rand/v2" imported as rand and not used`}
 	if repair := repairUnused(data, path, []compilerDiagnostic{diag}); !strings.Contains(string(repair), `import _ "math/rand/v2"`) {

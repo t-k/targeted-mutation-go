@@ -895,10 +895,16 @@ func TestWindowsProbeRuntimeCrossCompiles(t *testing.T) {
 	write(t, dir, filepath.Base(rt[0].Path), string(rt[0].Data))
 	write(t, dir, "sample.go", "package winprobe\nfunc Touch() { _ = tmtGoWinCompare(0, 1, 1, 2) }\n")
 
-	cmd := exec.Command("go", "build", ".")
+	cmd := exec.Command("go", "vet", ".")
 	cmd.Dir = dir
 	cmd.Env = append(os.Environ(), "GOOS=windows", "GOARCH=amd64", "CGO_ENABLED=0")
 	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("windows probe runtime cross-vet failed: %v\n%s", err, out)
+	}
+	buildCmd := exec.Command("go", "build", ".")
+	buildCmd.Dir = dir
+	buildCmd.Env = append(os.Environ(), "GOOS=windows", "GOARCH=amd64", "CGO_ENABLED=0")
+	if out, err := buildCmd.CombinedOutput(); err != nil {
 		t.Fatalf("windows probe runtime cross-compile failed: %v\n%s", err, out)
 	}
 }

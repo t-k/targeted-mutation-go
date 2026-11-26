@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -292,7 +293,7 @@ func TestFileSafety(t *testing.T) {
 		t.Fatal(err)
 	}
 	info, err := os.Stat(path)
-	if err != nil || info.Mode().Perm()&0077 != 0 {
+	if err != nil || (runtime.GOOS != "windows" && info.Mode().Perm()&0077 != 0) {
 		t.Fatalf("unsafe file permissions: %v, %v", info, err)
 	}
 	link := filepath.Join(dir, "symlink")

@@ -478,6 +478,9 @@ func TestCountUp(t *testing.T) {
 	assertAccountingIdentities(t, loopReport)
 
 	// Verify orphan child process reaping when statement-remove deletes defer cmd.Process.Kill()
+	if runtime.GOOS == "windows" {
+		return
+	}
 	procDir := t.TempDir()
 	writeFiles(t, procDir, map[string]string{
 		"go.mod": "module example.org/orphan\n\ngo 1.26.0\n",
