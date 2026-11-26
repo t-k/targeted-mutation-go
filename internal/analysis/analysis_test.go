@@ -90,8 +90,54 @@ func checkPlan(t *testing.T, op Operator, low, high, pivot uint64, samples []uin
 	if len(samples) == 0 && len(plan) != 0 {
 		t.Fatalf("unreached comparison planned %v", plan)
 	}
-	if len(samples) == 0 || op == EQ || op == NE {
+	if len(samples) == 0 {
 		return
+	}
+	if plan[0].Kind != "boundary" && op.Boundary() != 0 {
+		t.Fatalf("unexpected candidate list %v", plan)
+	}
+	negations := 0
+	for _, c := range plan {
+		if c.Kind == "negation" {
+			negations++
+			if !c.Infects(op, summary) {
+				t.Fatalf("negation does not affect observations: %v", c)
+			}
+		}
+	}
+	if negations != 1 {
+		t.Fatalf("expected exactly one negation: %v", plan)
+	}
+	if op == EQ || op == NE {
+		return
+	}
+	lo, hi, ok := ThresholdInterval(op, Domain{Low: low, High: high, Pivot: pivot}, summary)
+	if !ok {
+		t.Fatal("missing ordered interval")
+	}
+	checkInterval := func(alternative uint64) {
+		t.Helper()
+		if alternative < low || alternative > high {
+			return
+		}
+		consistent := true
+		for _, value := range samples {
+			consistent = consistent && evaluateOracle(op, value, pivot) == evaluateOracle(op, value, alternative)
+		}
+		if consistent != (lo <= alternative && alternative <= hi) {
+			t.Fatalf("interval [%d,%d] misclassified %d: op %v samples %v", lo, hi, alternative, op, samples)
+		}
+	}
+	for _, alternative := range []uint64{low, lo - 1, lo, pivot, hi, hi + 1, high} {
+		checkInterval(alternative)
+	}
+	if high-low <= 8 {
+		for alternative := low; ; alternative++ {
+			checkInterval(alternative)
+			if alternative == high {
+				break
+			}
+		}
 	}
 	for _, alternative := range []uint64{pivot - 1, pivot + 1} {
 		if alternative < low || alternative > high || alternative == pivot || (pivot == 0 && alternative == ^uint64(0)) || (pivot == ^uint64(0) && alternative == 0) {
@@ -130,5 +176,33 @@ func evaluateOracle(op Operator, x, y uint64) bool {
 		return x != y
 	default:
 		panic("invalid operator")
+	}
+}
+
+func TestThresholdIntervalRejectsEquality(t *testing.T) {
+	domain := Domain{Low: 0, High: 7, Pivot: 4}
+	var observed Summary
+	observed.Observe(4, 4)
+	for _, op := range []Operator{EQ, NE} {
+		if _, _, ok := ThresholdInterval(op, domain, observed); ok {
+			t.Fatalf("%v cannot be represented as a general interval", op)
+		}
+	}
+}
+
+func TestRankAndMergedExtremes(t *testing.T) {
+	var previous uint64
+	for i, value := range []int64{-1 << 63, -1, 0, 1, 1<<63 - 1} {
+		rank := RankSigned(value)
+		if UnrankSigned(rank) != value || i > 0 && rank <= previous {
+			t.Fatalf("invalid integer rank %d for %d", rank, value)
+		}
+		previous = rank
+	}
+	a := Summary{Flags: Less | Greater, Below: 0, Above: ^uint64(0)}
+	b := Summary{Flags: Less | Equal | Greater, Below: 10, Above: 12}
+	a.Merge(b)
+	if a != b {
+		t.Fatalf("got merged summary %+v, want %+v", a, b)
 	}
 }

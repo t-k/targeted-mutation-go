@@ -43,4 +43,19 @@ theorem shifts_preserve_domain (lo hi t : Int) (bounds : lo ≤ t ∧ t ≤ hi) 
 
 theorem rank_preserves_signed_order (x y : Int) : x < y ↔ x + 2^63 < y + 2^63 := by omega
 
+theorem up_interval (observed : Int → Prop) (original lower upper candidate : Int)
+    (hlo : ∀ x, observed x → x < original → x ≤ lower)
+    (hhi : ∀ x, observed x → original ≤ x → upper ≤ x)
+    (bounds : lower < candidate ∧ candidate ≤ upper) :
+    ∀ x, observed x → (original ≤ x ↔ candidate ≤ x) := by
+  intro x hx
+  by_cases before : x < original
+  · have := hlo x hx before
+    omega
+  · have := hhi x hx (by omega)
+    omega
+
+theorem rank_integer_offset (x : Int) (lower : -(2^63) ≤ x) (upper : x < 2^63) :
+    0 ≤ x + 2^63 ∧ x + 2^63 < 2^64 := by omega
+
 end TargetedMutation

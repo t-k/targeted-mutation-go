@@ -141,7 +141,10 @@ func Plan(op Operator, domain *Domain, seen Summary, targeted bool) []Candidate 
 }
 
 // ThresholdInterval returns the inclusive set of thresholds consistent with the observed decisions.
-func ThresholdInterval(op Operator, d Domain, seen Summary) (low, high uint64) {
+func ThresholdInterval(op Operator, d Domain, seen Summary) (low, high uint64, ok bool) {
+	if op.Boundary() == 0 {
+		return 0, 0, false
+	}
 	low, high = d.Low, d.High
 	if op == GE || op == LT {
 		if seen.Flags&Less != 0 {
@@ -162,7 +165,7 @@ func ThresholdInterval(op Operator, d Domain, seen Summary) (low, high uint64) {
 			high = seen.Above - 1
 		}
 	}
-	return low, high
+	return low, high, true
 }
 
 func Evaluate(op Operator, lhs, rhs uint64) bool {
