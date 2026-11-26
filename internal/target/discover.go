@@ -124,7 +124,10 @@ func Discover(ctx context.Context, dir string, patterns []string, tags string, s
 			}
 			data := snapshot.([]byte)
 			file := &File{Path: path, Data: data}
-			findSites(file, syntax, astFile, pkg, scope, full, portable)
+			findSites(file, syntax, astFile, pkg, scope, portable)
+			if full {
+				discoverSourceEdits(file, syntax, astFile, pkg, scope)
+			}
 			if len(file.Sites)+len(file.Edits) > 0 {
 				p.Files = append(p.Files, file)
 			}
@@ -149,7 +152,7 @@ func versionSupportsProbes(v string) bool {
 	return major > 1 || major == 1 && minor >= 18
 }
 
-func findSites(file *File, tree *ast.File, positions *token.File, pkg *packages.Package, scope Scope, full, probes bool) {
+func findSites(file *File, tree *ast.File, positions *token.File, pkg *packages.Package, scope Scope, probes bool) {
 	text := func(node ast.Node) string {
 		return string(file.Data[positions.Offset(node.Pos()):positions.Offset(node.End())])
 	}
@@ -158,11 +161,11 @@ func findSites(file *File, tree *ast.File, positions *token.File, pkg *packages.
 		if !ok || fn.Body == nil || hasCompilerDirective(fn) {
 			continue
 		}
-		findFunctionSites(file, fn, positions, pkg, scope, full, probes, text)
+		findFunctionSites(file, fn, positions, pkg, scope, probes, text)
 	}
 }
 
-func findFunctionSites(file *File, fn *ast.FuncDecl, positions *token.File, pkg *packages.Package, scope Scope, full, probes bool, text func(ast.Node) string) {
+func findFunctionSites(file *File, fn *ast.FuncDecl, positions *token.File, pkg *packages.Package, scope Scope, probes bool, text func(ast.Node) string) {
 	var stack []ast.Node
 	safety := make(map[ast.Stmt]bool)
 	ast.Inspect(fn.Body, func(node ast.Node) (visit bool) {
@@ -197,9 +200,6 @@ func findFunctionSites(file *File, fn *ast.FuncDecl, positions *token.File, pkg 
 					file.Sites = append(file.Sites, site)
 					return false
 				}
-			}
-			if full {
-				appendEdits(file, positions, expr, pkg)
 			}
 		}
 		return true
@@ -404,47 +404,4 @@ func operator(op token.Token) analysis.Operator {
 		return analysis.NE
 	}
 	return 0
-}
-
-func appendEdits(file *File, positions *token.File, expr *ast.BinaryExpr, pkg *packages.Package) {
-	op := expr.Op
-	var replacements []token.Token
-	if cmp := operator(op); cmp != 0 {
-		for _, opt := range []analysis.Operator{cmp.Boundary(), cmp.Negate()} {
-			if opt != 0 {
-				replacements = append(replacements, [...]token.Token{0, token.LSS, token.LEQ, token.GTR, token.GEQ, token.EQL, token.NEQ}[opt])
-			}
-		}
-	} else {
-		switch op {
-		case token.LAND:
-			replacements = []token.Token{token.LOR}
-		case token.LOR:
-			replacements = []token.Token{token.LAND}
-		case token.ADD:
-			replacements = []token.Token{token.SUB}
-		case token.SUB:
-			replacements = []token.Token{token.ADD}
-		case token.MUL:
-			replacements = []token.Token{token.QUO}
-		case token.QUO:
-			replacements = []token.Token{token.MUL}
-		}
-	}
-	pos := positions.PositionFor(expr.OpPos, false)
-	for _, replacement := range replacements {
-		// Addition can be string concatenation, and the rules for division by
-		// zero depend on the effective (possibly generic) operand types.
-		if op == token.ADD || replacement == token.QUO {
-			edited := *expr
-			edited.Op = replacement
-			if err := types.CheckExpr(pkg.Fset, pkg.Types, expr.Pos(), &edited, nil); err != nil {
-				continue
-			}
-		}
-		file.Edits = append(file.Edits, Edit{
-			File: file.Path, Line: pos.Line, Column: pos.Column, Start: pos.Offset, End: pos.Offset + len(op.String()),
-			Before: op.String(), After: replacement.String(), Kind: "source-operator",
-		})
-	}
 }

@@ -1,0 +1,10 @@
+Family	Scope	Context
+arithmetic	included	plain
+return	included	generic
+literal	excluded	named
+literal	included	plain
+return	excluded	plain
+return	included	named
+arithmetic	excluded	named
+literal	excluded	generic
+arithmetic	excluded	generic

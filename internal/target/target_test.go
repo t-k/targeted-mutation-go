@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -92,13 +93,113 @@ func unionZero[T ~int | ~float64](n T) T { return n * 0 }
 	}
 	edits := pkgs[0].Files[0].Edits
 	want := map[int]string{2: "-", 5: "-", 6: "/", 7: "/", 11: "-", 12: "/"}
-	if len(edits) != len(want) {
-		t.Fatalf("unexpected arithmetic candidates: %+v", edits)
-	}
 	for _, edit := range edits {
-		if want[edit.Line] != edit.After {
-			t.Fatalf("unexpected edit: %+v", edit)
+		if edit.Kind != "source-operator" {
+			continue
 		}
-		delete(want, edit.Line)
+		if edit.Line == 3 || edit.Line == 8 || edit.Line == 4 && (edit.After == "/" || edit.After == "%") {
+			t.Fatalf("invalid arithmetic edit: %+v", edit)
+		}
+		if want[edit.Line] == edit.After {
+			delete(want, edit.Line)
+		}
+	}
+	if len(want) > 0 {
+		t.Fatalf("missing arithmetic edits: %v", want)
+	}
+}
+
+func TestSourceCatalogue(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "go.mod", "module example.org/catalogue\n\ngo 1.26.0\n")
+	write(t, dir, "entry.go", `package catalogue
+import "fmt"
+const Limit = 0x10
+var Flag = true
+var Text = "default"
+func operate(a, b int) int {
+	a += b
+	a++
+	if a > b && a != 0 { a = b }
+	for a < b { if a == 2 { break }; a++ }
+	for range []int{1, 2} { a += b }
+	switch a { case 1: a += 2; default: a-- }
+	return a + b * 3
+}
+func masks(x, y uint) uint { x &= y; return x & y }
+func fallback(err error) (int, error) {
+	if err != nil { return 1, err }
+	return 3, fmt.Errorf("%%w: %w", err)
+}
+type record struct { N int }
+func value() record { return record{3} }
+func generic[T any](x T) T { return x }
+`)
+	pkgs, err := Discover(context.Background(), dir, []string{"."}, "", nil, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	edits := pkgs[0].Files[0].Edits
+	for _, want := range []struct{ before, after string }{
+		{"0x10", "17"}, {"0x10", "15"}, {"true", "false"}, {`"default"`, `""`},
+		{"+=", "-="}, {"+=", "="}, {"++", "--"}, {">", "=="}, {"&&", "||"},
+		{"a > b", "true"}, {"a < b", "false"}, {"break", "continue"},
+		{"", " break;"}, {"&=", "|="}, {"&", "^"}, {"err", "nil"},
+		{"%w", "%v"}, {"record{3}", "*new(record)"}, {"x", "*new(T)"},
+	} {
+		found := slices.ContainsFunc(edits, func(edit Edit) bool { return edit.Before == want.before && edit.After == want.after })
+		if !found {
+			t.Errorf("missing %q → %q", want.before, want.after)
+		}
+	}
+	if n := len(edits); n < 60 {
+		t.Fatalf("expected broad catalogue, got %d", n)
+	}
+}
+
+func TestSourceEditPICT(t *testing.T) {
+	data, err := os.ReadFile("../../verification/pict/source-edits.tsv")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, row := range strings.Split(strings.TrimSpace(string(data)), "\n")[1:] {
+		t.Run(strings.ReplaceAll(row, "\t", "/"), func(t *testing.T) {
+			fields := strings.Fields(row)
+			dir := t.TempDir()
+			path := filepath.Join(dir, "file.go")
+			write(t, dir, "go.mod", "module example.org/pict\n\ngo 1.26.0\n")
+			header := map[string]string{
+				"plain":   "func fn(x int) int ",
+				"named":   "type N int\nfunc fn(x N) N ",
+				"generic": "func fn[T ~int](x T) T ",
+			}[fields[2]]
+			statement, before, after := "{ return x + x }", "+", "-"
+			switch fields[0] {
+			case "literal":
+				statement, before, after = "{ return x + 3 }", "3", "4"
+			case "return":
+				statement, before, after = "{ return x }", "x", "0"
+				if fields[2] == "generic" {
+					after = "*new(T)"
+				}
+			}
+			source := "package p\n" + header + statement + "\n"
+			write(t, dir, "file.go", source)
+			var scope Scope
+			if fields[1] == "excluded" {
+				scope = Scope{path: {{Start: 1, End: 1}}}
+			}
+			pkgs, err := Discover(context.Background(), dir, []string{"."}, "", scope, true)
+			if err != nil {
+				t.Fatal(err)
+			}
+			found := false
+			for _, file := range pkgs[0].Files {
+				found = found || slices.ContainsFunc(file.Edits, func(e Edit) bool { return e.Before == before && e.After == after })
+			}
+			if found != (fields[1] == "included") {
+				t.Fatalf("found %q → %q: %v", before, after, found)
+			}
+		})
 	}
 }

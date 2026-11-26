@@ -154,7 +154,7 @@ func TestGate(t *testing.T) {
 	}
 	var source, probe int
 	for _, finding := range report.Findings {
-		if finding.Status == "unstable" && finding.Rule == "source-operator" {
+		if finding.Status == "unstable" && finding.Rule == "source-operator" && finding.Expression == "||" {
 			source++
 		}
 		if finding.Status == "unstable" && (finding.Rule == "boundary" || finding.Rule == "negation") {
