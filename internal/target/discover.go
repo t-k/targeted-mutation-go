@@ -433,19 +433,43 @@ func appendEdits(file *File, positions *token.File, expr *ast.BinaryExpr, info *
 	}
 	pos := positions.PositionFor(expr.OpPos, false)
 	for _, replacement := range replacements {
-		if replacement == token.ADD || replacement == token.SUB || replacement == token.MUL || replacement == token.QUO {
-			typ, ok := info.TypeOf(expr).Underlying().(*types.Basic)
-			if !ok || typ.Info()&types.IsNumeric == 0 {
-				continue
-			}
-			if value := info.Types[expr.Y].Value; replacement == token.QUO && value != nil &&
-				constant.Compare(value, token.EQL, constant.MakeInt64(0)) {
-				continue
-			}
+		typ := info.TypeOf(expr)
+		if op == token.ADD && !allTypesMatch(typ, types.IsNumeric) {
+			continue
+		}
+		if value := info.Types[expr.Y].Value; replacement == token.QUO && value != nil &&
+			constant.Compare(value, token.EQL, constant.MakeInt64(0)) &&
+			!allTypesMatch(typ, types.IsFloat|types.IsComplex) {
+			continue
 		}
 		file.Edits = append(file.Edits, Edit{
 			File: file.Path, Line: pos.Line, Column: pos.Column, Start: pos.Offset, End: pos.Offset + len(op.String()),
 			Before: op.String(), After: replacement.String(), Kind: "source-operator",
 		})
 	}
+}
+
+func allTypesMatch(typ types.Type, mask types.BasicInfo) bool {
+	if typ == nil {
+		return false
+	}
+	switch t := typ.Underlying().(type) {
+	case *types.Basic:
+		return t.Info()&mask != 0
+	case *types.Interface:
+		// A type belongs to an intersection only if it satisfies every embedded constraint.
+		for embedded := range t.NumEmbeddeds() {
+			if allTypesMatch(t.EmbeddedType(embedded), mask) {
+				return true
+			}
+		}
+	case *types.Union:
+		for term := range t.Len() {
+			if !allTypesMatch(t.Term(term).Type(), mask) {
+				return false
+			}
+		}
+		return t.Len() != 0
+	}
+	return false
 }
