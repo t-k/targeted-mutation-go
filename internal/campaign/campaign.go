@@ -156,7 +156,8 @@ func Run(ctx context.Context, cfg Config) (Report, error) {
 			return report, err
 		}
 	}
-	probeJobs := s.plan(&report)
+	reached := s.reachedConsumers()
+	probeJobs := s.plan(&report, reached)
 	results := parallel(ctx, cfg.Jobs, len(probeJobs), func(i int) jobResult {
 		return s.replay(ctx, probeJobs[i])
 	})
@@ -170,17 +171,23 @@ func Run(ctx context.Context, cfg Config) (Report, error) {
 		report.Replays += item.runs
 		report.add(item.finding, cfg.KilledFindings)
 	}
-	results = parallel(ctx, cfg.Jobs, len(s.sources), func(i int) jobResult {
-		return s.runSource(ctx, s.sources[i], base)
+	sourceResults := parallel(ctx, cfg.Jobs, len(s.sources), func(i int) sourceResult {
+		job := s.sources[i]
+		if job.edit != nil && job.edit.Site != nil {
+			return s.runSourceComparison(ctx, job, reached[job.edit.Site.ID], base)
+		}
+		return sourceResult{jobResult: s.runSource(ctx, job, base)}
 	})
 	if err := ctx.Err(); err != nil {
 		return report, err
 	}
-	for _, item := range results {
+	for _, item := range sourceResults {
 		if item.err != nil {
 			return report, item.err
 		}
 		report.SourceRuns += item.runs
+		report.Replays += item.replays
+		report.Skipped += item.skipped
 		report.add(item.finding, cfg.KilledFindings)
 	}
 	if cfg.VerifyWitnesses {
@@ -359,8 +366,7 @@ func (s *session) goTest(ctx context.Context, overlay string, patterns ...string
 	return runCommand(ctx, s.cfg.BuildTimeout, s.cfg.Dir, cleanEnv(), "go", args...)
 }
 
-func (s *session) plan(report *Report) []probeJob {
-	var jobs []probeJob
+func (s *session) reachedConsumers() [][]*consumer {
 	consumers := make([][]*consumer, len(s.sites))
 	for i := range s.consumers {
 		bin := &s.consumers[i]
@@ -368,7 +374,15 @@ func (s *session) plan(report *Report) []probeJob {
 			consumers[site] = append(consumers[site], bin)
 		}
 	}
+	return consumers
+}
+
+func (s *session) plan(report *Report, consumers [][]*consumer) []probeJob {
+	var jobs []probeJob
 	for _, site := range s.sites {
+		if site.String {
+			continue
+		}
 		var seen analysis.Summary
 		reached := consumers[site.ID]
 		for _, bin := range reached {

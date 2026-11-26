@@ -1,0 +1,13 @@
+
+func PROBECompareString[T ~string](site int, mask uint64, left, right T) uint64 {
+	order := uint64(1) << (1 + PROBEstrings.Compare(string(left), string(right)))
+	state := &PROBEStateValue
+	if state.slots != nil {
+		if state.site < 0 {
+			PROBERecord(&state.slots[site*3], order)
+		} else if state.site == site {
+			return PROBEActivate(state, site, mask, order, order)
+		}
+	}
+	return order & mask
+}

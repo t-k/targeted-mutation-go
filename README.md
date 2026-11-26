@@ -55,10 +55,10 @@ The catalogue was built against Gremlins 0.6.0, gomutants 0.7.3, gomu 0.3.0 and 
 | --- | --- |
 | `INPUT GAP` | The recorded comparisons agree under the original and the mutant. A distinguishing operand is shown when the tool can derive one. `--verify-survivors` replays the mutation to check this prediction. |
 | `ASSERTION GAP` | The mutant changed a comparison result in the listed test packages and the same tests still passed. |
-| `SOURCE SURVIVOR` | The selected suite passed against a source-level edit. |
+| `SOURCE SURVIVOR` | The source edit passed the selected suite, or a comparison probe established that the edit survived or agreed with the recorded comparisons. |
 | `UNTESTED CHANGE` | The selected suite passed after a Git hunk was restored. |
 | `UNREACHED` | The selected test binaries left this comparison unobserved. Use `--show-unreached` to list it. |
-| `NON VIABLE` | Compiler diagnostics attribute a build rejection to the edited candidate. |
+| `NON VIABLE` | A Go language rule or compiler diagnostics establish that the edit cannot compile. |
 | `UNSTABLE`, `TIMEOUT`, `BUILD ERROR`, `ERROR` | The campaign could not establish a verdict. |
 
 A witness marked `verified` passed on the original and failed with the mutant applied. A suggested operand can be useful even when the tool cannot derive an end-to-end test call. Automatic witness compilation currently supports direct comparisons of a single integer parameter in a standalone function.
@@ -72,11 +72,13 @@ JSON reports use `schema: 1`. Integers in thresholds and witnesses are decimal s
 3. Observe comparison results and the nearest values on either side. Use the observations to derive test-equivalent thresholds and skip binary replays whose observed comparison results stay the same.
 4. Give each remaining replay a fresh process and a private trace. Require evidence that the mutation was reached and changed a result before assigning an assertion-gap or killed verdict.
 
-The probes support integer ordering and equality, including named integer types and architecture-sized integers. Tests in other selected packages can cover a site. The analysis conservatively leaves contexts that can change evaluation order or compile-time semantics out of instrumentation, including some expressions containing calls, constant-length range expressions, and generated or cgo-transformed source. Package-level tracing accommodates subtests and parallel tests. The guarantees about pruning apply to deterministic tests and the selected Go build configuration.
+The probes support integer ordering and equality, including named integer types and architecture-sized integers. `--full` also probes eligible string comparisons, including named string types. Tests in other selected packages can cover a site. The analysis conservatively leaves contexts that can change evaluation order or compile-time semantics out of instrumentation, including some expressions containing calls, constant-length range expressions, and generated or cgo-transformed source. Package-level tracing accommodates subtests and parallel tests. The guarantees about pruning apply to deterministic tests and the selected Go build configuration.
 
 Use explicit module package patterns at a workspace root that has no Go module, for example `./app/... ./lib/...`. Only compatible build flags are accepted in `GOFLAGS`. Pass test timeouts and build tags through the CLI.
 
-Source replay shares original snapshots and creates each edited file inside a worker. It can retry once when the edit leaves an unused import or local variable. The retry preserves import initialization and the local's initializer. The ordinary baseline runs Go vet. Source mutant verdicts come from the compiler and tests. Source discovery can include original Go files in cgo packages and uses the compiler to validate edits that require cgo.
+`--full` reuses the comparison binaries for eligible source operator replacements. The JSON `evidence` field records `observed` for agreement on the recorded comparisons, `replayed` for a binary replay, `source-replay` for a separate source overlay, and `static` for an edit that empties a function body with required results. An unconfirmed comparison replay falls back to its source overlay. `--source-only` builds every candidate independently.
+
+Source replay shares original snapshots and creates each edited file inside a worker. It can retry once when the edit leaves an unused import or local variable. The retry preserves import initialization and the local's initializer. The ordinary baseline runs Go vet. Source discovery can include original Go files in cgo packages and uses the compiler to validate edits that require cgo.
 
 The command runs target build tools and tests with your permissions. Run it on code you trust. The tool's own source edits and test binaries live in temporary overlays.
 

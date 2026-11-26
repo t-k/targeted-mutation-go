@@ -37,15 +37,15 @@ type sourceEdits struct {
 	positions *token.File
 	pkg       *packages.Package
 	scope     Scope
-	probed    map[int]bool
+	probed    map[int]*Site
 	added     map[editKey]bool
 	rawSource bool
 }
 
 func discoverSourceEdits(file *File, tree *ast.File, positions *token.File, pkg *packages.Package, scope Scope, rawSource bool) {
-	edits := sourceEdits{file: file, positions: positions, pkg: pkg, scope: scope, probed: make(map[int]bool), added: make(map[editKey]bool), rawSource: rawSource}
+	edits := sourceEdits{file: file, positions: positions, pkg: pkg, scope: scope, probed: make(map[int]*Site, len(file.Sites)), added: make(map[editKey]bool), rawSource: rawSource}
 	for _, site := range file.Sites {
-		edits.probed[site.Start] = true
+		edits.probed[site.OperatorAt] = site
 	}
 	ast.PreorderStack(tree, nil, edits.visit)
 }
@@ -159,8 +159,8 @@ func (e *sourceEdits) replace(node ast.Node, kind, replacement string) {
 	e.add(node.Pos(), node.End(), node.Pos(), kind, replacement)
 }
 
-func (e *sourceEdits) operator(pos token.Pos, op, replacement token.Token) {
-	e.add(pos, pos+token.Pos(len(op.String())), pos, "source-operator", replacement.String())
+func (e *sourceEdits) operator(pos token.Pos, op, replacement token.Token) *Edit {
+	return e.add(pos, pos+token.Pos(len(op.String())), pos, "source-operator", replacement.String())
 }
 
 func (e *sourceEdits) swap(pos token.Pos, original, first, second token.Token) {
@@ -174,6 +174,7 @@ func (e *sourceEdits) swap(pos token.Pos, original, first, second token.Token) {
 
 func (e *sourceEdits) binary(n *ast.BinaryExpr, parent ast.Node) {
 	original := operator(n.Op)
+	site := e.probed[e.positions.Offset(n.OpPos)]
 	for _, family := range binaryFamilies {
 		if !slices.Contains(family, n.Op) {
 			continue
@@ -183,14 +184,24 @@ func (e *sourceEdits) binary(n *ast.BinaryExpr, parent ast.Node) {
 				continue
 			}
 			other := operator(replacement)
-			if other != 0 && e.probed[e.positions.Offset(n.Pos())] && (other == original.Boundary() || other == original.Negate()) {
+			grouped := changesGrouping(n, parent, replacement) || e.joinsToken(n.OpPos, n.Op, replacement)
+			if site != nil && !grouped {
+				if !site.String && (other == original.Boundary() || other == original.Negate()) {
+					continue
+				}
+				// The already-typed operands admit all six comparison operators.
+				if edit := e.operator(n.OpPos, n.Op, replacement); edit != nil {
+					if site.Reversed {
+						other = other.Reverse()
+					}
+					edit.Site, edit.Operator = site, other
+				}
 				continue
 			}
 			edited := *n
 			edited.Op = replacement
 			// A standalone type check lacks the enclosing constant declaration's iota.
 			valid := e.pkg.TypesInfo.Types[n].Value != nil || e.check(n.Pos(), &edited)
-			grouped := changesGrouping(n, parent, replacement) || e.joinsToken(n.OpPos, n.Op, replacement)
 			switch {
 			case valid && !grouped:
 				e.operator(n.OpPos, n.Op, replacement)

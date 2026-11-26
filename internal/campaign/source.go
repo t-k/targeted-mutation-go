@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/t-k/targeted-mutation-go/internal/analysis"
 	"github.com/t-k/targeted-mutation-go/internal/target"
 )
 
@@ -14,6 +15,53 @@ type sourceJob struct {
 	source      []byte
 	edit        *target.Edit
 	finding     Finding
+}
+
+type sourceResult struct {
+	jobResult
+	replays, skipped int
+}
+
+func (s *session) runSourceComparison(ctx context.Context, job sourceJob, reached []*consumer, baseline commandResult) sourceResult {
+	site := job.edit.Site
+	candidate := analysis.Candidate{Op: job.edit.Operator}
+	probe := probeJob{site: site, candidate: candidate, finding: job.finding}
+	for _, bin := range reached {
+		if candidate.Infects(site.Op, bin.seen[site.ID]) {
+			probe.consumers = append(probe.consumers, bin)
+		}
+	}
+	probe.predicted = len(probe.consumers) == 0
+	result := sourceResult{skipped: len(reached) - len(probe.consumers)}
+	if probe.predicted && (s.cfg.VerifySurvivors || s.cfg.Conventional) {
+		probe.consumers = reached
+		result.skipped = 0
+		if len(reached) == 0 {
+			result.jobResult = s.runSource(ctx, job, baseline)
+			return result
+		}
+	}
+	probe.finding.Status, probe.finding.Evidence = "source-survivor", "observed"
+	if len(probe.consumers) == 0 {
+		result.finding = probe.finding
+		return result
+	}
+	replayed := s.replay(ctx, probe)
+	result.replays = replayed.runs
+	if replayed.err != nil {
+		result.err = replayed.err
+		return result
+	}
+	result.finding = replayed.finding
+	switch result.finding.Status {
+	case "assertion-gap":
+		result.finding.Status = "source-survivor"
+	case "source-survivor", "killed":
+	default:
+		// An unconfirmed probe verdict must be resolved using the actual edit.
+		result.jobResult = s.runSource(ctx, job, baseline)
+	}
+	return result
 }
 
 func (job sourceJob) materialize() target.Replacement {

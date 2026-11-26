@@ -14,7 +14,11 @@ func Rewrite(file *File, prefix string) []byte {
 	previous := 0
 	for _, site := range sites {
 		result.Write(file.Data[previous:site.Start])
-		fmt.Fprintf(&result, "%sCompare(%d, %d, %s, %s", prefix, site.ID, site.Op.Mask(), site.Left, site.Right)
+		compare := "Compare"
+		if site.String {
+			compare = "CompareString"
+		}
+		fmt.Fprintf(&result, "%s%s(%d, %d, %s, %s", prefix, compare, site.ID, site.Op.Mask(), site.Left, site.Right)
 		lines := strings.Count(site.Expression, "\n") - strings.Count(site.Left, "\n") - strings.Count(site.Right, "\n")
 		if lines > 0 {
 			result.WriteByte(',')

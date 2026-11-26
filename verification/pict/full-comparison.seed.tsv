@@ -1,0 +1,8 @@
+Operands	Order	Mode
+integers	less	full
+constant-left	equal	full
+strings	greater	full
+strings	unreached	verified
+float	equal	source-only
+nested-bool	less	full
+joined	less	full

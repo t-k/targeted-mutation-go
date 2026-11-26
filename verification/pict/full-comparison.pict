@@ -1,0 +1,4 @@
+Operands: integers, constant-left, strings, float, nested-bool, joined
+Order: less, equal, greater, unreached
+Mode: full, verified, source-only
+IF [Operands] = "nested-bool" THEN [Order] = "less";

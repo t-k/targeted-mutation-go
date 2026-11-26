@@ -53,11 +53,12 @@ type Site struct {
 	ID                      int
 	File                    string
 	Line, Column            int
-	Start, End              int
+	Start, End, OperatorAt  int
 	Left, Right, Expression string
 	Op                      analysis.Operator
 	Domain                  *analysis.Domain
 	Callable                string
+	Reversed, String        bool
 }
 
 type Edit struct {
@@ -66,6 +67,8 @@ type Edit struct {
 	Start, End          int
 	Before, After, Kind string
 	MissingReturn       bool
+	Site                *Site
+	Operator            analysis.Operator
 }
 
 type Discovery struct {
@@ -142,7 +145,9 @@ func Discover(ctx context.Context, dir string, patterns []string, tags string, s
 			}
 			data := snapshot.([]byte)
 			file := &File{Path: path, Data: data}
-			findSites(file, syntax, astFile, pkg, scope, portable)
+			if portable {
+				findSites(file, syntax, astFile, pkg, scope, options.Full && pkg.Types.Scope().Lookup("string") == nil)
+			}
 			if options.Full || options.SourceOnly {
 				discoverSourceEdits(file, syntax, astFile, pkg, scope, cgoWithoutTypes)
 			}
@@ -184,7 +189,7 @@ func versionSupportsProbes(v string) bool {
 	return major > 1 || major == 1 && minor >= 18
 }
 
-func findSites(file *File, tree *ast.File, positions *token.File, pkg *packages.Package, scope Scope, probes bool) {
+func findSites(file *File, tree *ast.File, positions *token.File, pkg *packages.Package, scope Scope, stringsOK bool) {
 	text := func(node ast.Node) string {
 		return string(file.Data[positions.Offset(node.Pos()):positions.Offset(node.End())])
 	}
@@ -193,11 +198,11 @@ func findSites(file *File, tree *ast.File, positions *token.File, pkg *packages.
 		if !ok || fn.Body == nil || hasCompilerDirective(fn) {
 			continue
 		}
-		findFunctionSites(file, fn, positions, pkg, scope, probes, text)
+		findFunctionSites(file, fn, positions, pkg, scope, stringsOK, text)
 	}
 }
 
-func findFunctionSites(file *File, fn *ast.FuncDecl, positions *token.File, pkg *packages.Package, scope Scope, probes bool, text func(ast.Node) string) {
+func findFunctionSites(file *File, fn *ast.FuncDecl, positions *token.File, pkg *packages.Package, scope Scope, stringsOK bool, text func(ast.Node) string) {
 	var stack []ast.Node
 	safety := make(map[ast.Stmt]bool)
 	ast.Inspect(fn.Body, func(node ast.Node) (visit bool) {
@@ -222,13 +227,14 @@ func findFunctionSites(file *File, fn *ast.FuncDecl, positions *token.File, pkg 
 				return true
 			}
 			op := operator(expr.Op)
-			if probes && op != 0 && safeStatement(stack, pkg.TypesInfo, safety) && validOperand(expr.X) && validOperand(expr.Y) && pkg.TypesInfo.Types[expr].Value == nil {
+			if op != 0 && safeStatement(stack, pkg.TypesInfo, safety) && validOperand(expr.X) && validOperand(expr.Y) {
 				site := &Site{
 					File: file.Path, Line: pos.Line, Column: pos.Column,
-					Start: start.Offset, End: positions.Offset(expr.End()), Op: op,
+					Start: start.Offset, End: positions.Offset(expr.End()), OperatorAt: pos.Offset, Op: op,
 					Left: text(expr.X), Right: text(expr.Y), Expression: text(expr),
 				}
-				if makeIntegerSite(site, expr, fn, pkg) {
+				site.String = stringsOK && stringOperands(expr, pkg.TypesInfo)
+				if site.String || makeIntegerSite(site, expr, fn, pkg) {
 					file.Sites = append(file.Sites, site)
 					return false
 				}
@@ -366,6 +372,7 @@ func makeIntegerSite(site *Site, expr *ast.BinaryExpr, fn *ast.FuncDecl, pkg *pa
 		left, right = right, left
 		site.Left, site.Right = site.Right, site.Left
 		site.Op = site.Op.Reverse()
+		site.Reversed = true
 		variable = expr.Y
 	}
 	basic, ok := left.Type.Underlying().(*types.Basic)
@@ -409,6 +416,19 @@ func makeIntegerSite(site *Site, expr *ast.BinaryExpr, fn *ast.FuncDecl, pkg *pa
 		}
 	}
 	return true
+}
+
+func stringOperands(expr *ast.BinaryExpr, info *types.Info) bool {
+	left, right := info.Types[expr.X], info.Types[expr.Y]
+	if left.Type == nil || right.Type == nil {
+		return false
+	}
+	if left.Value != nil {
+		left, right = right, left
+	}
+	basic, ok := left.Type.Underlying().(*types.Basic)
+	return ok && basic.Kind() == types.String && left.Value == nil &&
+		(types.Identical(left.Type, right.Type) || right.Type == types.Typ[types.UntypedString] && right.Value != nil)
 }
 
 func directReturn(fn *ast.FuncDecl, expr *ast.BinaryExpr) bool {

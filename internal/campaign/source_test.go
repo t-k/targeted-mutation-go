@@ -2,12 +2,26 @@ package campaign
 
 import (
 	"bytes"
+	"context"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
 
+	"github.com/t-k/targeted-mutation-go/internal/analysis"
 	"github.com/t-k/targeted-mutation-go/internal/target"
 )
+
+func TestSourceComparisonDoesNotAcceptProbeIOErrorAsSurvival(t *testing.T) {
+	site := target.Site{Op: analysis.EQ}
+	s := session{scratch: filepath.Join(t.TempDir(), "absent"), sites: []*target.Site{&site}}
+	job := sourceJob{edit: &target.Edit{Site: &site, Operator: analysis.NE}}
+	reached := []*consumer{{seen: map[int]analysis.Summary{0: {Flags: analysis.Equal}}}}
+	r := s.runSourceComparison(context.Background(), job, reached, commandResult{})
+	if r.err == nil {
+		t.Fatalf("accepted a replay whose trace could not be opened: %+v", r)
+	}
+}
 
 func TestUnusedRepairIsBoundToTheEditedFile(t *testing.T) {
 	const path = "/tmp/private-overlay/source-0.go"

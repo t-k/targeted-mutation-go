@@ -1,3 +1,5 @@
+import Std.Tactic
+
 /-! The Go planner stores each operand in its integer order as a rank. The finite integer domain
 is checked at the call site. The following four lemmas identify the only rank that can
 distinguish the original from an adjacent threshold. The final lemmas justify the extrema
@@ -57,5 +59,22 @@ theorem up_interval (observed : Int → Prop) (original lower upper candidate : 
 
 theorem rank_integer_offset (x : Int) (lower : -(2^63) ≤ x) (upper : x < 2^63) :
     0 ≤ x + 2^63 ∧ x + 2^63 < 2^64 := by omega
+
+-- Bits 0, 1, and 2 represent the less, equal, and greater cases of a total order.
+theorem comparison_mask_exact (seen original mutant : BitVec 3) :
+    (seen &&& (original ^^^ mutant) = 0#3) ↔
+      ((seen.getLsbD 0 = true → original.getLsbD 0 = mutant.getLsbD 0) ∧
+       (seen.getLsbD 1 = true → original.getLsbD 1 = mutant.getLsbD 1) ∧
+       (seen.getLsbD 2 = true → original.getLsbD 2 = mutant.getLsbD 2)) := by
+  bv_decide
+
+def swapOperands (mask : BitVec 3) : BitVec 3 :=
+  ((mask &&& 1#3) <<< 2) ||| (mask &&& 2#3) ||| ((mask &&& 4#3) >>> 2)
+
+theorem swap_operands_preserves_agreement (seen original mutant : BitVec 3) :
+    seen &&& (original ^^^ mutant) = 0#3 ↔
+      swapOperands seen &&& (swapOperands original ^^^ swapOperands mutant) = 0#3 := by
+  unfold swapOperands
+  bv_decide
 
 end TargetedMutation

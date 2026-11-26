@@ -100,15 +100,7 @@ func PROBECompare[T PROBEInteger](site int, mask uint64, left, right T) uint64 {
 		if state.shift {
 			mutantOrder = PROBEOrder(PROBERank(left), state.pivot)
 		}
-		original, mutant := order&mask != 0, mutantOrder&state.mask != 0
-		flags := uint64(8)
-		if original != mutant {
-			flags |= 16
-		}
-		if word := &state.slots[site*3]; PROBEatomic.LoadUint64(word)&flags != flags {
-			PROBEatomic.OrUint64(word, flags)
-		}
-		return mutantOrder & state.mask
+		return PROBEActivate(state, site, mask, order, mutantOrder)
 	}
 	slot := state.slots[site*3 : site*3+3]
 	if order == 1 {
@@ -126,8 +118,22 @@ func PROBECompare[T PROBEInteger](site int, mask uint64, left, right T) uint64 {
 			}
 		}
 	}
-	if PROBEatomic.LoadUint64(&slot[0])&order == 0 {
-		PROBEatomic.OrUint64(&slot[0], order)
-	}
+	PROBERecord(&slot[0], order)
 	return order & mask
+}
+
+func PROBEActivate(state *PROBEState, site int, mask, order, mutantOrder uint64) uint64 {
+	flags := uint64(8)
+	mutant := mutantOrder & state.mask
+	if (order&mask != 0) != (mutant != 0) {
+		flags |= 16
+	}
+	PROBERecord(&state.slots[site*3], flags)
+	return mutant
+}
+
+func PROBERecord(word *uint64, bits uint64) {
+	if PROBEatomic.LoadUint64(word)&bits != bits {
+		PROBEatomic.OrUint64(word, bits)
+	}
 }
