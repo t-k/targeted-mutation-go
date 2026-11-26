@@ -1,0 +1,16 @@
+Outcome	Path	Known
+input-gap	plain	present
+assertion-gap	unicode-column	present
+source-survivor	reserved	absent
+untested-change	plain	present
+weakened-test	plain	present
+killed	plain	present
+non-viable	plain	present
+unstable	plain	present
+timeout	plain	present
+build-error	outside	present
+error	absent	present
+cancelled	plain	present
+candidate	reserved	present
+not-evaluated	absent	present
+unknown	plain	present
