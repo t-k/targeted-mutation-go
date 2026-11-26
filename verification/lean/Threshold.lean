@@ -147,4 +147,9 @@ theorem next_masked_none (x forbidden bit w : BitVec 64)
     w &&& forbidden = 0#64 → ¬ BitVec.ule x w := by
   bv_decide
 
+theorem min_bound_eq_le (x lo : Int) (h : lo ≤ x) : (x = lo ↔ x ≤ lo) := by omega
+theorem min_bound_ne_gt (x lo : Int) (h : lo ≤ x) : (x ≠ lo ↔ lo < x) := by omega
+theorem max_bound_eq_ge (x hi : Int) (h : x ≤ hi) : (x = hi ↔ hi ≤ x) := by omega
+theorem max_bound_ne_lt (x hi : Int) (h : x ≤ hi) : (x ≠ hi ↔ x < hi) := by omega
+
 end TargetedMutation

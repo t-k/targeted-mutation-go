@@ -72,6 +72,8 @@ type Site struct {
 	InputArgument           int
 	Reversed, String        bool
 	Float, Margin           bool
+	Arith                   bool
+	ArithOp                 uint64
 	CanDropOperands         bool
 }
 
@@ -86,6 +88,7 @@ type Edit struct {
 	Operator            analysis.Operator
 	Pivot               uint64
 	Shift               int
+	ArithOp             uint64
 }
 
 type Discovery struct {
@@ -303,10 +306,81 @@ func findFunctionSites(file *File, fn *ast.FuncDecl, positions *token.File, pkg 
 					file.Sites = append(file.Sites, site)
 					return false
 				}
+			} else if full {
+				if code := arithCode(expr.Op); code != 0 && safeStatement(stack, pkg.TypesInfo, safety) &&
+					validOperand(expr.X, pkg.TypesInfo) && validOperand(expr.Y, pkg.TypesInfo) &&
+					makeArithSite(expr, pkg.TypesInfo) {
+					site := &Site{
+						File: file.Path, Line: pos.Line, Column: pos.Column,
+						StartLine: start.Line, EndLine: end.Line,
+						Start: start.Offset, End: positions.Offset(expr.End()), OperatorAt: pos.Offset,
+						Left: text(expr.X), Right: text(expr.Y), Expression: text(expr),
+						Arith: true, ArithOp: code,
+					}
+					file.Sites = append(file.Sites, site)
+					return false
+				}
 			}
 		}
 		return true
 	})
+}
+
+func arithCode(tok token.Token) uint64 {
+	switch tok {
+	case token.ADD:
+		return 1
+	case token.SUB:
+		return 2
+	case token.MUL:
+		return 3
+	case token.QUO:
+		return 4
+	case token.REM:
+		return 5
+	case token.AND:
+		return 6
+	case token.OR:
+		return 7
+	case token.XOR:
+		return 8
+	case token.AND_NOT:
+		return 9
+	}
+	return 0
+}
+
+func makeArithSite(expr *ast.BinaryExpr, info *types.Info) bool {
+	resType := info.TypeOf(expr)
+	if resType == nil {
+		return false
+	}
+	if _, tp := resType.(*types.TypeParam); tp {
+		return false
+	}
+	basic, ok := resType.Underlying().(*types.Basic)
+	if !ok || basic.Info()&types.IsInteger == 0 || basic.Info()&types.IsUntyped != 0 {
+		return false
+	}
+	xType, yType := info.TypeOf(expr.X), info.TypeOf(expr.Y)
+	if xType == nil || yType == nil {
+		return false
+	}
+	xOK := types.Identical(xType, resType) || info.Types[expr.X].Value != nil
+	yOK := types.Identical(yType, resType) || info.Types[expr.Y].Value != nil
+	if !xOK || !yOK {
+		return false
+	}
+	// Do not shadow any nested comparison expression.
+	hasComparison := false
+	ast.Inspect(expr, func(n ast.Node) bool {
+		if b, ok := n.(*ast.BinaryExpr); ok && operator(b.Op) != 0 {
+			hasComparison = true
+			return false
+		}
+		return !hasComparison
+	})
+	return !hasComparison
 }
 
 func parameterOrLiteral(expr ast.Expr, fn *ast.FuncDecl, info *types.Info) bool {

@@ -199,12 +199,25 @@ func (e *sourceEdits) binary(n *ast.BinaryExpr, parent ast.Node) {
 		}
 		for _, replacement := range family {
 			if n.Op == replacement || (n.Op == token.ADD || n.Op == token.SUB) && replacement == token.REM ||
-				e.isMinBoundEquivalent(n, replacement) {
+				e.isBoundEquivalent(n, replacement) {
 				continue
 			}
 			other := operator(replacement)
 			grouped := changesGrouping(n, parent, replacement) || e.joinsToken(n.OpPos, n.Op, replacement)
 			if site != nil && !grouped {
+				if site.Arith {
+					repCode := arithCode(replacement)
+					if repCode != 0 {
+						edited := *n
+						edited.Op = replacement
+						if e.pkg.TypesInfo.Types[n].Value != nil || e.check(n.Pos(), &edited) {
+							if edit := e.operator(n.OpPos, n.Op, replacement); edit != nil {
+								edit.Site, edit.ArithOp = site, repCode
+							}
+						}
+					}
+					continue
+				}
 				if !site.String && (other == original.Boundary() || other == original.Negate()) {
 					continue
 				}
@@ -243,17 +256,31 @@ func (e *sourceEdits) binary(n *ast.BinaryExpr, parent ast.Node) {
 	}
 }
 
-func (e *sourceEdits) isMinBoundEquivalent(n *ast.BinaryExpr, replacement token.Token) bool {
-	if e.rawSource || e.pkg == nil || e.pkg.TypesInfo == nil || (n.Op != token.EQL && n.Op != token.NEQ) {
+func (e *sourceEdits) isBoundEquivalent(n *ast.BinaryExpr, replacement token.Token) bool {
+	if e.rawSource || e.pkg == nil || e.pkg.TypesInfo == nil {
 		return false
 	}
 	if e.exprAtMinBound(n.X, n.Y) {
-		return n.Op == token.EQL && replacement == token.LEQ || n.Op == token.NEQ && replacement == token.GTR
+		return boundPair(n.Op, replacement, token.EQL, token.LEQ) ||
+			boundPair(n.Op, replacement, token.NEQ, token.GTR)
 	}
 	if e.exprAtMinBound(n.Y, n.X) {
-		return n.Op == token.EQL && replacement == token.GEQ || n.Op == token.NEQ && replacement == token.LSS
+		return boundPair(n.Op, replacement, token.EQL, token.GEQ) ||
+			boundPair(n.Op, replacement, token.NEQ, token.LSS)
+	}
+	if e.exprAtMaxBound(n.X, n.Y) {
+		return boundPair(n.Op, replacement, token.EQL, token.GEQ) ||
+			boundPair(n.Op, replacement, token.NEQ, token.LSS)
+	}
+	if e.exprAtMaxBound(n.Y, n.X) {
+		return boundPair(n.Op, replacement, token.EQL, token.LEQ) ||
+			boundPair(n.Op, replacement, token.NEQ, token.GTR)
 	}
 	return false
+}
+
+func boundPair(op, replacement, a, b token.Token) bool {
+	return op == a && replacement == b || op == b && replacement == a
 }
 
 func (e *sourceEdits) exprAtMinBound(variable, bound ast.Expr) bool {
@@ -270,7 +297,10 @@ func (e *sourceEdits) exprAtMinBound(variable, bound ast.Expr) bool {
 	if basic.Info()&types.IsString != 0 && tv.Value.Kind() == constant.String {
 		return constant.StringVal(tv.Value) == ""
 	}
-	if basic.Info()&types.IsInteger != 0 && tv.Value.Kind() == constant.Int && constant.Sign(tv.Value) == 0 {
+	if basic.Info()&types.IsInteger == 0 || tv.Value.Kind() != constant.Int {
+		return false
+	}
+	if constant.Sign(tv.Value) == 0 {
 		if basic.Info()&types.IsUnsigned != 0 {
 			return true
 		}
@@ -278,7 +308,78 @@ func (e *sourceEdits) exprAtMinBound(variable, bound ast.Expr) bool {
 			return true
 		}
 	}
+	if lo, ok := fixedSignedMin(basic.Kind()); ok {
+		if v, exact := constant.Int64Val(tv.Value); exact && v == lo {
+			return true
+		}
+	}
 	return false
+}
+
+func (e *sourceEdits) exprAtMaxBound(variable, bound ast.Expr) bool {
+	info := e.pkg.TypesInfo
+	tv := info.Types[bound]
+	varTV := info.Types[variable]
+	if tv.Value == nil || varTV.Type == nil {
+		return false
+	}
+	basic, ok := varTV.Type.Underlying().(*types.Basic)
+	if !ok || basic.Info()&types.IsInteger == 0 || tv.Value.Kind() != constant.Int {
+		return false
+	}
+	if hi, ok := fixedUnsignedMax(basic.Kind()); ok {
+		if v, exact := constant.Uint64Val(tv.Value); exact && v == hi {
+			return true
+		}
+	}
+	if hi, ok := fixedSignedMax(basic.Kind()); ok {
+		if v, exact := constant.Int64Val(tv.Value); exact && v == hi {
+			return true
+		}
+	}
+	return false
+}
+
+func fixedSignedMin(kind types.BasicKind) (int64, bool) {
+	switch kind {
+	case types.Int8:
+		return -128, true
+	case types.Int16:
+		return -32768, true
+	case types.Int32:
+		return -2147483648, true
+	case types.Int64:
+		return -9223372036854775808, true
+	}
+	return 0, false
+}
+
+func fixedSignedMax(kind types.BasicKind) (int64, bool) {
+	switch kind {
+	case types.Int8:
+		return 127, true
+	case types.Int16:
+		return 32767, true
+	case types.Int32:
+		return 2147483647, true
+	case types.Int64:
+		return 9223372036854775807, true
+	}
+	return 0, false
+}
+
+func fixedUnsignedMax(kind types.BasicKind) (uint64, bool) {
+	switch kind {
+	case types.Uint8:
+		return 255, true
+	case types.Uint16:
+		return 65535, true
+	case types.Uint32:
+		return 4294967295, true
+	case types.Uint64:
+		return 18446744073709551615, true
+	}
+	return 0, false
 }
 
 func (e *sourceEdits) joinsToken(pos token.Pos, original, replacement token.Token) bool {

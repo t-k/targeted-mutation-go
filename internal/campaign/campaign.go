@@ -65,6 +65,7 @@ type consumer struct {
 type probeJob struct {
 	site      *target.Site
 	candidate analysis.Candidate
+	arithOp   uint64
 	consumers []*consumer
 	predicted bool
 	finding   Finding
@@ -98,6 +99,9 @@ type session struct {
 	virtualDirs  map[string]string
 	testedDeps   map[string]bool
 	workerProcs  int
+	coverProfile string
+	coverPkg     string
+	coverage     *coverageMap
 }
 
 func Run(ctx context.Context, cfg Config) (Report, error) {
@@ -219,7 +223,11 @@ func Run(ctx context.Context, cfg Config) (Report, error) {
 	}
 	report.WorkspaceDirs = s.collectWorkspaceDirs()
 	s.replacements = s.collect(reversions)
-	report.Sites = len(s.sites)
+	for _, site := range s.sites {
+		if !site.Arith {
+			report.Sites++
+		}
+	}
 	if err := s.validateSnapshots(); err != nil {
 		return report, err
 	}
@@ -249,9 +257,31 @@ func Run(ctx context.Context, cfg Config) (Report, error) {
 	if !explicitTimeout {
 		baselineConfig.cfg.Timeout = min(s.cfg.BuildTimeout, 2*time.Minute)
 	}
+	if s.cfg.Full && !s.cfg.SourceOnly && !s.cfg.Conventional && !s.cfg.VerifySurvivors && len(s.virtualDirs) == 0 && len(s.sources) > 0 {
+		var coverPkgs []string
+		seenPkg := make(map[string]bool, len(s.packages))
+		for _, pkg := range s.packages {
+			if pkg.Path != "" && !seenPkg[pkg.Path] && len(pkg.Files) > 0 {
+				seenPkg[pkg.Path] = true
+				coverPkgs = append(coverPkgs, pkg.Path)
+			}
+		}
+		if len(coverPkgs) > 0 {
+			baselineConfig.coverProfile = filepath.Join(s.scratch, "baseline.cover")
+			baselineConfig.coverPkg = strings.Join(coverPkgs, ",")
+		}
+	}
 	base := baselineConfig.goTest(ctx, "", s.testPatterns()...)
 	if base.kind != "passed" {
 		return report, fmt.Errorf("ordinary Go test baseline %s:\n%s", base.kind, base.detail)
+	}
+	if baselineConfig.coverProfile != "" {
+		for _, pkg := range s.testPackages {
+			if base.packages[pkg.Path] == "pass" && !dirHasTestFiles(pkg.Dir) {
+				base.packages[pkg.Path] = "skip"
+			}
+		}
+		s.coverage = loadCoverageProfile(baselineConfig.coverProfile, s.packages)
 	}
 	if s.cfg.TestRun != "" && countRunEvents(base.inventory) == 0 {
 		return report, fmt.Errorf("no tests matched --test %q", s.cfg.TestRun)
@@ -373,6 +403,10 @@ func Run(ctx context.Context, cfg Config) (Report, error) {
 			res = s.cachedEdit(job.finding, site, reached[site.ID], func() sourceResult {
 				return s.runSourceComparison(ctx, job, reached[site.ID], base)
 			})
+		} else if job.edit != nil && isCoveragePrunableEdit(job.edit, job.source) && s.coverage.isUncovered(job.edit.File, job.source, job.edit) {
+			f := job.finding
+			f.Status, f.Evidence = "source-survivor", "observed"
+			res = sourceResult{jobResult: jobResult{finding: f}, skipped: 1}
 		} else {
 			res = s.cachedEdit(job.finding, nil, nil, func() sourceResult {
 				return sourceResult{jobResult: s.runSource(ctx, job, base)}
@@ -792,6 +826,9 @@ func (s *session) goTestCommand(ctx context.Context, overlay string, failfast bo
 	if s.cfg.TestRun != "" {
 		args = append(args, "-run=" + s.cfg.TestRun)
 	}
+	if s.coverProfile != "" && s.coverPkg != "" {
+		args = append(args, "-coverprofile="+s.coverProfile, "-coverpkg="+s.coverPkg)
+	}
 	if overlay != "" {
 		// The ordinary baseline has already passed vet. A source mutation can
 		// be executable Go even when a static quality check rejects it.
@@ -816,6 +853,9 @@ func (s *session) reachedConsumers() [][]*consumer {
 func (s *session) plan(report *Report, consumers [][]*consumer, allObserved *[]Finding) []probeJob {
 	var jobs []probeJob
 	for _, site := range s.sites {
+		if site.Arith {
+			continue
+		}
 		var seen analysis.Summary
 		reached := consumers[site.ID]
 		for _, bin := range reached {
@@ -921,6 +961,9 @@ func (s *session) replay(ctx context.Context, job probeJob) jobResult {
 	result := jobResult{finding: job.finding}
 	f := &result.finding
 	mode := selector(job.site, job.candidate)
+	if job.site.Arith {
+		mode = fmt.Sprintf("%d:%d:0:0", job.site.ID, job.arithOp)
+	}
 	f.Evidence = "replayed"
 	for _, bin := range job.consumers {
 		trace, err := newTrace(s.scratch, len(s.sites))
@@ -943,7 +986,12 @@ func (s *session) replay(ctx context.Context, job probeJob) jobResult {
 			f.Status, f.Detail = run.kind, run.detail
 			return result
 		}
-		if flags&8 == 0 || (flags&16 != 0) == job.predicted ||
+		if job.site.Arith {
+			if flags&8 == 0 || (run.kind == "failed" && flags&16 == 0) {
+				f.Status, f.Detail = "unstable", "replay disagreed with baseline observations"
+				return result
+			}
+		} else if flags&8 == 0 || (flags&16 != 0) == job.predicted ||
 			run.kind == "failed" && job.predicted {
 			f.Status, f.Detail = "unstable", "replay disagreed with baseline observations"
 			return result

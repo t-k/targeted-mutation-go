@@ -18,6 +18,9 @@ var stringProbeSource string
 //go:embed probe_float.go.txt
 var floatProbeSource string
 
+//go:embed probe_arith.go.txt
+var arithProbeSource string
+
 type Replacement struct {
 	Path        string
 	Line        int
@@ -39,6 +42,11 @@ func Runtime(pkg Package) []Replacement {
 		return slices.ContainsFunc(file.Sites, func(site *Site) bool { return site.Float })
 	}) {
 		source += floatProbeSource
+	}
+	if slices.ContainsFunc(pkg.Files, func(file *File) bool {
+		return slices.ContainsFunc(file.Sites, func(site *Site) bool { return site.Arith })
+	}) {
+		source += arithProbeSource
 	}
 	source = strings.NewReplacer("PROBE_PACKAGE", pkg.Name, "PROBE", pkg.Prefix).Replace(source)
 	name, _ := syntheticProbeFileName(pkg.Prefix, pkg.Paths)

@@ -174,6 +174,9 @@ func (s *session) resetReportToScope(report *Report, changed target.Scope, reach
 	report.Suppressed = 0
 	report.Findings = report.Findings[:0]
 	for _, site := range s.sites {
+		if site.Arith {
+			continue
+		}
 		if !changed.Contains(site.File, site.StartLine, site.EndLine) {
 			continue
 		}

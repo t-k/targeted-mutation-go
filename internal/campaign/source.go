@@ -28,7 +28,13 @@ type sourceResult struct {
 }
 
 func (s *session) runSourceComparison(ctx context.Context, job sourceJob, reached []*consumer, baseline commandResult) sourceResult {
+	site := job.edit.Site
 	if len(reached) == 0 {
+		if site != nil && site.Arith && !s.cfg.VerifySurvivors && !s.cfg.Conventional {
+			f := job.finding
+			f.Status, f.Evidence = "source-survivor", "observed"
+			return sourceResult{jobResult: jobResult{finding: f}, skipped: 1}
+		}
 		res := sourceResult{jobResult: s.runSource(ctx, job, baseline)}
 		if res.finding.Status == "timeout" && res.deadlineExceeded && s.cfg.Jobs == 1 && s.cfg.TimeoutRecheck != "none" {
 			res.finding.Status, res.finding.Detail = "killed", "killed by timeout"
@@ -36,24 +42,29 @@ func (s *session) runSourceComparison(ctx context.Context, job sourceJob, reache
 		}
 		return res
 	}
-	site := job.edit.Site
-	candidate := analysis.Candidate{Op: job.edit.Operator, Pivot: job.edit.Pivot, Shift: job.edit.Shift, Float: site.Float}
-	probe := probeJob{site: site, candidate: candidate, finding: job.finding}
-	for _, bin := range reached {
-		if candidate.Infects(site.Op, bin.seen[site.ID]) {
-			probe.consumers = append(probe.consumers, bin)
+	var probe probeJob
+	var result sourceResult
+	if site.Arith {
+		probe = probeJob{site: site, arithOp: job.edit.ArithOp, consumers: reached, finding: job.finding}
+	} else {
+		candidate := analysis.Candidate{Op: job.edit.Operator, Pivot: job.edit.Pivot, Shift: job.edit.Shift, Float: site.Float}
+		probe = probeJob{site: site, candidate: candidate, finding: job.finding}
+		for _, bin := range reached {
+			if candidate.Infects(site.Op, bin.seen[site.ID]) {
+				probe.consumers = append(probe.consumers, bin)
+			}
 		}
-	}
-	probe.predicted = len(probe.consumers) == 0
-	result := sourceResult{skipped: len(reached) - len(probe.consumers)}
-	if probe.predicted && (s.cfg.VerifySurvivors || s.cfg.Conventional) {
-		probe.consumers = reached
-		result.skipped = 0
-	}
-	probe.finding.Status, probe.finding.Evidence = "source-survivor", "observed"
-	if len(probe.consumers) == 0 {
-		result.finding = probe.finding
-		return result
+		probe.predicted = len(probe.consumers) == 0
+		result = sourceResult{skipped: len(reached) - len(probe.consumers)}
+		if probe.predicted && (s.cfg.VerifySurvivors || s.cfg.Conventional) {
+			probe.consumers = reached
+			result.skipped = 0
+		}
+		probe.finding.Status, probe.finding.Evidence = "source-survivor", "observed"
+		if len(probe.consumers) == 0 {
+			result.finding = probe.finding
+			return result
+		}
 	}
 	replayed := s.replay(ctx, probe)
 	result.replays = replayed.runs

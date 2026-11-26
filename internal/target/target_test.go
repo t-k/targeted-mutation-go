@@ -810,8 +810,9 @@ func TestTargetBoundaryConditions(t *testing.T) {
 	write(t, dir, "bounds.go", "package tbounds\n"+
 		"import (\n\t\"fmt\"\n\t\"slices\"\n)\n"+
 		"type Doc struct {\n\tName string `json:\"name\"`\n}\n"+
-		"func Check(s string, u uint, xs []int) error {\n"+
-		"\tif s == \"\" || s != \"\" || u == 0 || u != 0 || len(xs) == 0 || len(xs) != 0 {}\n"+
+		"func Check(s string, u uint, xs []int, b uint8, i8 int8) error {\n"+
+		"\tif s == \"\" || s != \"\" || u == 0 || u != 0 || len(xs) == 0 || len(xs) != 0 || len(xs) > 0 || len(xs) <= 0 || i8 == -128 {}\n"+
+		"\tif b == 255 || b != 255 || b < 255 || b >= 255 || i8 == 127 {}\n"+
 		"\tswitch u { case 1: }\n"+
 		"\t_ = slices.Contains([]int{1, 2, 3, 4, 5, 6, 7, 8}, 1)\n"+
 		"\t_ = slices.Contains([]int{1, 2, 3, 4, 5, 6, 7, 8, 9}, 1)\n"+
@@ -829,13 +830,19 @@ func TestTargetBoundaryConditions(t *testing.T) {
 			t.Fatalf("struct tag should not be mutated by string-literal: %+v", e)
 		}
 		if e.Kind == "source-operator" && e.Line == 10 &&
-			((e.Before == "==" && e.After == "<=") || (e.Before == "!=" && e.After == ">")) {
+			((e.Before == "==" && e.After == "<=") || (e.Before == "!=" && e.After == ">") ||
+				(e.Before == ">" && e.After == "!=") || (e.Before == "<=" && e.After == "==")) {
 			t.Fatalf("min-bound equivalent operator swap %s -> %s should be omitted: %+v", e.Before, e.After, e)
 		}
-		if e.Kind == "empty-block" && e.Line == 10 {
+		if e.Kind == "source-operator" && e.Line == 11 &&
+			((e.Before == "==" && e.After == ">=") || (e.Before == "!=" && e.After == "<") ||
+				(e.Before == "<" && e.After == "!=") || (e.Before == ">=" && e.After == "==")) {
+			t.Fatalf("max-bound equivalent operator swap %s -> %s should be omitted: %+v", e.Before, e.After, e)
+		}
+		if e.Kind == "empty-block" && (e.Line == 10 || e.Line == 11) {
 			t.Fatalf("already-empty block must not emit empty-block: %+v", e)
 		}
-		if e.Kind == "empty-case" && e.Line == 11 {
+		if e.Kind == "empty-case" && e.Line == 12 {
 			t.Fatalf("already-empty case must not emit empty-case: %+v", e)
 		}
 		if e.Kind == "slice-element-remove" {
