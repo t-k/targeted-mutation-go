@@ -3,7 +3,7 @@
 [![Go: 1.26+](https://img.shields.io/badge/go-1.26%2B-00ADD8.svg)](#quick-start)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
-**Targeted mutation testing for Go**: `targeted-mutation-go` observes the runtime values your tests pass through comparisons, derives adjacent threshold changes and viable mutations that your suite misses, and verifies copyable Go assertions that catch them.
+**Targeted mutation testing for Go**: `targeted-mutation-go` observes the runtime values your tests pass through comparisons, derives adjacent threshold/margin changes and viable mutations that your suite misses, and verifies copyable Go assertions that catch them.
 
 ---
 
@@ -11,13 +11,13 @@
 
 Conventional Go mutation tools (`gremlins`, `gomutants`, `go-mutants`, `gomu`) apply fixed syntactic rewrites (`>=` → `>`, `+` → `-`, `{ ... }` → `{}`), recompile or re-test per candidate, and report a flat list of `SURVIVED` mutants to diagnose by hand. That workflow leaves three structural gaps:
 
-1. **Syntactic rewrites miss value-level boundary bugs.** Suppose `FreeShipping(price int) bool` checks `price >= 5000`, and tests check `4800` and `5000`. Those two inputs kill `price > 5000` and `price < 5000`—giving a 100% score on conventional boundary operators—yet `price >= 4999` still passes every test. By recording the nearest observed operands on each side of a comparison, `targeted-mutation-go` computes the closed interval of undistinguished thresholds (`4801..5000`) in $O(1)$ without an SMT solver or LLM, and names `4999` directly.
-2. **`SURVIVED` conflates missing inputs with weak assertions.** Along the Reachability–Infection–Propagation–Reveal (RIPR) model, a surviving comparison mutant means either no test passed a distinguishing input (**`INPUT GAP`**) or a comparison result flipped during a test and the suite still passed (**`ASSERTION GAP`**, whether the result was ignored or masked downstream). `targeted-mutation-go` separates the two, can isolate up to 32 leaf tests to identify which ones observed the flipped outcome, and can compile and verify a concrete `if got := ...; got != ...` check against both the original code and the mutant.
-3. **Rebuilding per mutant wastes CI time.** Instead of invoking `go test` from scratch for every comparison edit, `targeted-mutation-go` builds **one** instrumented test binary per consumer package via `go test -c -overlay=...`, skips replays whose recorded observations prove identical outcomes, and reuses those same binaries in `--full` mode for eligible operator, literal-step, and boolean-condition mutations.
+1. **Syntactic rewrites miss value-level boundary bugs.** Suppose `FreeShipping(price int) bool` checks `price >= 5000`, and tests check `4800` and `5000`. Those two inputs kill `price > 5000` and `price < 5000`—giving a 100% score on conventional boundary operators—yet `price >= 4999` still passes every test. By recording the nearest observed operands and rank distances on each side of a comparison, `targeted-mutation-go` computes the closed interval of undistinguished thresholds (`4801..5000`) or variable-RHS margins (`balance >= price - 1`) in $O(1)$ without an SMT solver or LLM, jumping across impossible bitmask holes to name the exact reachable input.
+2. **`SURVIVED` conflates missing inputs with weak assertions.** Along the Reachability–Infection–Propagation–Reveal (RIPR) model, a surviving comparison mutant means either no test passed a distinguishing input (**`INPUT GAP`**) or a comparison result flipped during a test and the suite still passed (**`ASSERTION GAP`**, whether the result was ignored or masked downstream). `targeted-mutation-go` separates the two, isolates up to 32 leaf tests (excluding parent-test setup noise) to identify which ones observed the flipped outcome, and can compile and verify a concrete `if got := ...; got != ...` check against both the original code and the mutant.
+3. **Rebuilding per mutant wastes CI time.** Instead of invoking `go test` from scratch for every comparison edit, `targeted-mutation-go` builds **one** instrumented test binary per consumer package via `go test -c -overlay=...`, skips replays whose recorded observations prove identical outcomes, and reuses those same binaries in `--full` mode for eligible integer, float, and string operator, literal-step, and boolean-condition mutations.
 
 | Dimension | Conventional Go mutation tools | `targeted-mutation-go` |
 | --- | --- | --- |
-| **Threshold discovery** | Fixed token swaps (`>=` → `>`) | Synthesizes nearest undistinguished integer threshold + equivalence interval from runtime extrema |
+| **Boundary & margin discovery** | Fixed token swaps (`>=` → `>`) | Synthesizes nearest reachable integer thresholds, variable-RHS margins (`a >= b - 1`), `len`/`cap` bounds, and float boundaries |
 | **Builds for probe sites** | Per-mutant rebuild or overlay run | **1 `-overlay` test binary** per consumer package |
 | **Replay pruning** | Evaluates every candidate | Skips provably equivalent mutations; runs **only consumer binaries where observations diverge** |
 | **Survivor diagnosis** | Generic `SURVIVED` / `LIVED` | Separates **`INPUT GAP`** (missing boundary input) from **`ASSERTION GAP`** (comparison flipped, tests passed) |
@@ -31,7 +31,7 @@ Conventional Go mutation tools (`gremlins`, `gomutants`, `go-mutants`, `gomu`) a
 
 ### Requirements & install
 
-- **Go 1.26 or newer** on **Linux or macOS** (`GOOS`/`GOARCH` must execute natively on the host).
+- **Go 1.26 or newer** to build `targeted-mutation-go` on **Linux or macOS** (`GOOS`/`GOARCH` must execute natively on the host; target modules declaring `go 1.18` or newer are supported by probes).
 - Run `targeted-mutation-go` only on code you trust: like `go test`, it compiles and executes target packages and tests with your user permissions. Target files in your checkout are never modified; edits and synthetic files live in temporary `go -overlay` directories.
 
 ```sh
@@ -96,7 +96,7 @@ INPUT GAP checkout.go:4:15
         t.Fatalf("got %v, want false", got)
     }
 
-1 sites, 1 test binaries, 2 probe replays (1 avoided), 0 source runs, 2 killed, 0 unreached, 0 non-viable, 0 incomplete
+1 sites, 1 test binaries, 2 probe replays (1 avoided), 0 source runs, 2 killed, 1 survived, 0 unreached, 0 non-viable, 0 incomplete
 $ echo $?
 2
 ```
@@ -134,7 +134,7 @@ SOURCE SURVIVOR checkout.go:8:9
 
     import "testing"
 
-    func TestTmtSourceWitness53c1a74fc4b19a4e75ac6c9e(t *testing.T) {
+    func TestTmtSourceWitness45484083435b9b7bf14404dd(t *testing.T) {
         if got := Discount(10, 10); got != 1 {
             t.Fatalf("got %v, want 1", got)
         }
@@ -149,14 +149,14 @@ SOURCE SURVIVOR checkout.go:8:9
 
 | Finding | Status in JSON | Meaning | What to do |
 | --- | --- | --- | --- |
-| **`INPUT GAP`** | `input-gap` | Observed operands never separate the mutant from the original. Includes `threshold_interval` and a distinguishing operand or call when derivable. | Add a test exercising the reported boundary input (pass `--verify-survivors` to replay predicted survivors explicitly). |
+| **`INPUT GAP`** | `input-gap` | Observed operands never separate the mutant from the original. Includes `threshold_interval` and a distinguishing operand, call, or variable-RHS margin when derivable. | Add a test exercising the reported boundary input (pass `--verify-survivors` to replay predicted survivors explicitly). |
 | **`ASSERTION GAP`** | `assertion-gap` | The mutant flipped a runtime comparison in the listed consumer package(s), yet every selected test still passed. | Tighten assertions in the tests surfaced by `--suggest-assertions`. |
-| **`SOURCE SURVIVOR`** | `source-survivor` | A `--full` or `--source-only` edit compiled and passed the selected test suite (or matched recorded comparison observations). | Add a test covering the mutated behavior (use `--verify-witnesses` or `--suggest-assertions` to synthesize a witness). |
-| **`UNTESTED CHANGE`** | `untested-change` | With `--since REV --undo-changes`, reverting a modified tracked Git hunk or AST sub-hunk still passed all selected tests. | Add a regression test that fails against the pre-PR behavior. |
+| **`SOURCE SURVIVOR`** | `source-survivor` | A `--full` or `--source-only` edit compiled and passed the selected test suite (or matched recorded comparison observations on reached sites). | Add a test covering the mutated behavior (use `--verify-witnesses` or `--suggest-assertions` to synthesize a witness). |
+| **`UNTESTED CHANGE`** | `untested-change` | With `--since REV --undo-changes`, reverting a modified tracked Git hunk or AST sub-hunk still passed all selected tests. | Add a regression test that fails against the pre-PR behavior, or silence intentional refactorings with `// tmt:ignore`. |
 | **`WEAKENED TEST`** | `weakened-test` | With `--since REV`, tests changed in the working tree now let a mutation survive (or go unreached) that the `REV` tests killed on current production code. | Restore the lost test coverage from `REV`. |
 | **`UNREACHED`** | `unreached` | No selected test executed this comparison site (hidden by default; shown with `--show-unreached`). | Add test coverage that reaches the code path. |
-| **`NON VIABLE`** | `non-viable` | Static Go rules or compiler diagnostics reject the candidate edit (`non_viable` counter). | No action needed. |
-| **`UNSTABLE` / `TIMEOUT` / `BUILD ERROR` / `ERROR` / `NOT EVALUATED` / `AUDIT DISAGREEMENT`** | `unstable`, `timeout`, `build-error`, `error`, `not-evaluated`, `audit-disagreement` | Per-candidate evaluation could not establish a sound verdict (e.g., flaky test inventory, candidate timeout, broken previous test baseline, or `--audit` mismatch). Increments `incomplete` and exits `3`. | Fix test nondeterminism, raise `--timeout` / `--build-timeout`, or inspect `detail`. |
+| **`NON VIABLE`** | `non-viable` | Static Go rules or compiler diagnostics reject the candidate edit (counted in `non_viable`; hidden in text output unless `--show-non-viable` is passed). | No action needed. |
+| **`UNSTABLE` / `TIMEOUT` / `BUILD ERROR` / `ERROR` / `NOT EVALUATED` / `AUDIT DISAGREEMENT`** | `unstable`, `timeout`, `build-error`, `error`, `not-evaluated`, `audit-disagreement` | Per-candidate evaluation could not establish a sound verdict (e.g., flaky test inventory, unconfirmed timeout, broken previous test baseline, or `--audit` mismatch). Increments `incomplete` and exits `3`. | Fix test nondeterminism, raise `--timeout` / `--build-timeout`, or inspect `detail`. |
 
 Each evaluated finding carries an `evidence` tag in text (`[...]`) and JSON:
 - `observed` — proven equivalent on the recorded runtime comparison summary without re-running tests.
@@ -165,25 +165,33 @@ Each evaluated finding carries an `evidence` tag in text (`[...]`) and JSON:
 - `previous-tests` — compared against test files restored from `--since`.
 - `static` — rejected statically without invoking the compiler (for example, emptying a function body whose signature requires return values).
 
-### Impossible-value filtering & witness synthesis
+### Impossible-value filtering, inline suppressions & witness synthesis
 
-- **Attainability constraints:** When the non-constant side of an integer comparison is masked (`x & 0x05`) or bounded by a constant remainder (`x % 3`, `x % -3`), the planner constrains the operand domain (`ZeroBits` and signed/unsigned remainder bounds) so unreachable ranks at `pivot` or `pivot ± 1` are excluded from boundary candidates and witness suggestions.
-- **Comparison witnesses (`--verify-witnesses`):** Synthesizes and verifies direct calls for non-generic package functions whose body returns the comparison directly and whose parameters (up to 8) are basic scalars (`bool`, `string`, numeric types). When a direct call cannot be constructed, the report still emits the distinguishing operand value.
-- **Assertion attribution (`--suggest-assertions`):** Filters out sites touched during package `init` or `TestMain` (verified via `-test.run=^$`), isolates up to **32** leaf tests per assertion gap to confirm which test executions observed the flipped comparison, and verifies a concrete assertion when callable.
-- **Source witnesses (`--verify-witnesses` / `--suggest-assertions`):** Searches up to **80** literal-seeded input combinations across up to **8** surviving source edits (prioritizing semantic rules first) on non-generic free functions taking up to **3** basic scalar parameters and returning **1** basic scalar value. Every reported `source_witness.code` is confirmed to pass on the original package and fail at the marker assertion on the mutated package.
+- **Attainability constraints & hole-jumping:** When the non-constant side of an integer comparison uses bitwise masks (`x & 0xF0`, negative masks like `x & -2`), bit-clear (`x &^ 1`), left shifts (`x << 2`), remainders (`x % 3`, `x % -3`), `len(xs)` / `cap(xs)` (bounded `>= 0`), or nested combinations (`(x & 3) & 8`), the planner computes exact domain bounds and `ZeroBits` and jumps across unreachable holes (`PrevPossible` / `NextPossible`) to propose the nearest reachable threshold (e.g., `(flags & 0xF0) >= 0x20` proposes `16` rather than impossible `31`).
+- **Inline suppressions (`// tmt:ignore`):** Place `// tmt:ignore <reason>` or `/* tmt:ignore <reason> */` at the end of a line to suppress findings on that line, or on standalone comment line(s) immediately above a statement to suppress the following line. Suppressed gaps increment `suppressed` (and `survivor_breakdown.suppressed`) and do not trigger exit code `2`.
+- **Comparison witnesses (`--verify-witnesses`):** Synthesizes and verifies direct calls for non-generic package functions whose body returns the comparison directly and whose parameters (up to 8) are basic scalars (`bool`, `string`, numeric types).
+- **Assertion attribution (`--suggest-assertions`):** Filters out sites touched during package `init` or `TestMain` (via `-test.run=^$`), attributes parent tests directly when setup before `t.Run` already flips the site (`^TestParent$/^$`) rather than falsely attributing sibling subtests, isolates up to **32** leaf tests per assertion gap, and verifies a concrete assertion when callable.
+- **Source witnesses (`--verify-witnesses` / `--suggest-assertions`):** Searches up to **80** literal-seeded input combinations (including large integer constants up to $10^9$) across up to **8** surviving AST-screened source edits inside an isolated temporary working directory.
 
-### Exit codes & machine-readable formats
+### Exit codes, accounting identities & machine-readable formats
 
 | Exit code | Meaning |
 | ---: | --- |
 | **`0`** | Complete run with zero unsuppressed test gaps (also `--help`, `version`, and a valid `--list` preview) |
-| **`1`** | CLI usage error, environment/package-discovery error, or ordinary/instrumented baseline build, timeout, execution, or test-inventory failure |
+| **`1`** | CLI usage error, empty `--test` match, environment/package-discovery error, or ordinary/instrumented baseline failure |
 | **`2`** | Complete run (`incomplete == 0`) with at least one unsuppressed gap (`input-gap`, `assertion-gap`, `source-survivor`, `untested-change`, `weakened-test`) |
-| **`3`** | Run completed with `incomplete > 0` (per-candidate `unstable`, `timeout`, `build-error`, `error`, unconfirmed `--since` previous-test comparison, failed witness verification, or `audit-disagreement`) |
+| **`3`** | Run completed with `incomplete > 0` (per-candidate `unstable`, unconfirmed `timeout`, `build-error`, `error`, unconfirmed `--since` previous-test comparison, failed witness verification, or `audit-disagreement`) |
 
-- **JSON (`--format json`) & JSONL (`--format jsonl`):** Top-level `"schema": 1`. Threshold intervals and witness inputs are encoded as base-10 strings so 64-bit signed and unsigned integers (`int64` / `uint64`) never lose precision in `IEEE-754` parsers. JSONL emits one `"type": "summary"` header followed by one `"type": "finding"` line per finding.
-- **SARIF 2.1.0 (`--format sarif`):** Emits repository-relative `%SRCROOT%` URIs, UTF-16 code-unit `startColumn` offsets, rule descriptors, `invocations[].executionSuccessful`, and `partialFingerprints["targetedMutationId/v1"]` for GitHub Code Scanning.
-- **Move-resilient finding IDs:** Every finding ID hashes `(file, rule, expression, mutation, enclosingFuncAndTrimmedLineAnchor, occurrenceInFile, relativeColumn)`. Inserting lines above a function, moving a function within its file, or re-indenting preserves baseline IDs and deterministic `--shard` assignments.
+Every evaluated JSON report satisfies three accounting identities (with `timed_out` omitted when `0`):
+- `mutants_run == killed + survived` (total evaluated verdicts including observation-pruned and checkpoint-resumed mutants; actual executions are reported in `mutation_replays` and `source_runs`)
+- `timed_out <= killed` (probe mutations that genuinely exceed the timeout after changing a comparison decision on serial recheck are counted as `killed` and `timed_out`)
+- `survived == survivor_breakdown.reported + survivor_breakdown.suppressed`
+
+Format guarantees:
+- **Terminal safety:** `text` output and `stderr` strip 7-bit/8-bit ANSI escape sequences (CSI/OSC/DCS/SOS/PM/APC), C0/DEL/C1 control characters, Unicode BiDi directional overrides, and inline line breaks from untrusted project strings, while JSON, JSONL, and SARIF remain lossless.
+- **JSON (`--format json`) & JSONL (`--format jsonl`):** Top-level `"schema": 1`. Threshold intervals and witness inputs are base-10 strings to preserve full 64-bit integer precision.
+- **SARIF 2.1.0 (`--format sarif`):** Emits `%SRCROOT%`-relative URIs (including sibling `go.work` workspace modules), UTF-16 `startColumn` offsets, rule descriptors, `invocations[].executionSuccessful`, and `partialFingerprints["targetedMutationId/v1"]`.
+- **Move-resilient finding IDs:** Hashes `(file, rule, expression, mutation, enclosingFuncAndTrimmedLineAnchor, occurrenceInFile, relativeColumn)` so moving a function within its file or inserting lines above it preserves `--baseline` IDs and `--shard` assignments.
 
 ---
 
@@ -191,9 +199,9 @@ Each evaluated finding carries an `evidence` tag in text (`[...]`) and JSON:
 
 | Mode | Flags | What runs |
 | --- | --- | --- |
-| **Targeted comparisons** *(default)* | *(none)* | Instruments eligible integer comparisons (`<`, `<=`, `>`, `>=`, `==`, `!=`), tests boundary & negation changes, and synthesizes adjacent open thresholds from runtime observations. |
-| **Conventional comparisons** | `--conventional` | Runs syntactic boundary and negation probe mutations without threshold synthesis and without skipping whole mutants predicted to survive (unaffected consumer binaries are still skipped when another consumer diverges). |
-| **Full hybrid catalogue** | `--full` | Combines integer & string comparison probes with the full AST source mutation catalogue below, routing probe-compatible operator, literal-step, and boolean edits through prebuilt `.test` binaries before falling back to per-edit overlays. |
+| **Targeted comparisons** *(default)* | *(none)* | Instruments eligible integer comparisons (including `len`/`cap`) and float comparisons (`float32`/`float64`), tests boundary & negation changes, and synthesizes adjacent reachable integer thresholds and variable-RHS margins (`a >= b ± 1`) from runtime observations. |
+| **Conventional comparisons** | `--conventional` | Runs syntactic boundary and negation probe mutations without threshold/margin synthesis and without skipping whole mutants predicted to survive (unaffected consumer binaries are still skipped when another consumer diverges). |
+| **Full hybrid catalogue** | `--full` | Combines integer, float, and string comparison probes with the full AST source mutation catalogue below, routing probe-compatible operator, literal-step, and boolean edits through prebuilt `.test` binaries before falling back to per-edit overlays. |
 | **Source-only** | `--source-only` | Evaluates the full AST mutation catalogue exclusively through isolated per-edit `go test -overlay` runs (supports cgo files and bypasses probe instrumentation). |
 
 ### Source mutation catalogue (`--full` and `--source-only`)
@@ -204,7 +212,7 @@ Each evaluated finding carries an `evidence` tag in text (`[...]`) and JSON:
 | **Arithmetic & bitwise** | `+`, `-`, `*`, `/`, `%` (excluding `+`/`-` → `%`), `&`, `\|`, `^`, `&^`, `<<` ↔ `>>`, compound assignments (`+=`, `-=`, `*=`, `/=`, `%=`, `&=`, `\|=`, `^=`, `&^=`, `<<=`, `>>=`) plus replacement with plain `=`, unary `+` ↔ `-`, unary `^x` → `&x` when type-valid, `++` ↔ `--` |
 | **Conditions & control flow** | Logical `&&` ↔ `\|\|`, `&&`/`\|\|` individual operand replacement (`boolean-operand`), unary `!x` → `x` (`remove-not`), `if`/`for` condition forced `true`/`false` (`condition-constant`) and `!(cond)` (`condition-negation`), `break` ↔ `continue`, early `break` in `for ... range` (`range-break`), emptying non-empty blocks (`empty-block`) and `switch`/`select` clauses (`empty-case`) |
 | **Literals & returns** | Integer literals `±1` (`integer-step`), float literals `±1.0` (`float-step`), string literals (`""` → `"mutated"`, non-empty → `""`; `string-literal`), `true` ↔ `false` (`boolean-literal`), return value replacements with `true`/`false` (`return-boolean`), `0`/`""`/typed zero (`return-zero`), and `nil` (`return-nil`) |
-| **Errors & statements** | `err != nil` → `false` (`error-check`), `fmt.Errorf` / `*Errorf` `"%w"` → `"%v"` (`errorf-unwrap`), standalone expression/`defer`/`go`/send/assignment/`++`/`--` statement removal (`statement-remove`), and blanking assignment LHS `x = rhs` → `_ = rhs` (`discard-assignment`) |
+| **Errors & statements** | `err != nil` → `false` (`error-check`), `fmt.Errorf` / `*Errorf` `"%w"` → `"%v"` (`errorf-unwrap`), standalone expression/`defer`/`go`/`<-`/assignment/`++`/`--` statement removal (`statement-remove`), and blanking assignment LHS `x = rhs` → `_ = rhs` (`discard-assignment`) |
 | **Standard library & numeric intent** | Built-in `min` ↔ `max`, `math.Min` ↔ `Max`, `slices.Min` ↔ `Max` / `MinFunc` ↔ `MaxFunc` (`min-max`); `math.Floor`/`Ceil`/`Round`/`RoundToEven`/`Trunc` swaps (`rounding-mode`); `strings` & `bytes` `HasPrefix`/`HasSuffix` → `Contains` (`affix-contains`), `TrimPrefix` ↔ `TrimSuffix` & `CutPrefix` ↔ `CutSuffix` (`affix-end`), `Index`/`IndexByte`/`IndexAny` ↔ `LastIndex*` (`search-direction`), `Replace(..., 1)` ↔ `ReplaceAll(...)` (`replacement-count`); `slices.Contains`/`Index` 2–8 element scalar literal pruning (`slice-element-remove`); `(a * b) / c` → `((a / c) * b)` and `(a * (b / c))` (`integer-rounding-order`) |
 
 Operator coverage and verdicts were validated against **Gremlins 0.6.0**, **gomutants 0.7.3**, **gomu 0.3.0**, and **go-mutants 0.1.2** on a recorded peer fixture (`benchmarks/peer_parity.py`)—see [benchmarks/README.md](benchmarks/README.md).
@@ -236,7 +244,7 @@ targeted-mutation-go analyze --full --checkpoint .tmt-campaign.jsonl --audit 5 .
 
 ### How `--since` and `--undo-changes` work on pull requests
 
-- **Diff-scoped findings (`--since REV`):** Restricts ordinary findings to changed lines in tracked `.go` files plus untracked `.go` files (intersected with `--lines` when both are given).
+- **Diff-scoped findings (`--since REV`):** Restricts ordinary findings and summary counters to full AST spans intersecting changed lines in tracked `.go` files plus untracked `.go` files (intersected with `--lines` when both are given).
 - **Hunk & sub-hunk reversion (`--undo-changes`):** For modified tracked production `.go` files (excluding newly added `/dev/null` files and untracked files), restores each changed Git hunk to `REV`. Where an edited expression retains a byte-exact surrounding prefix or suffix anchor against `REV`, multi-addition edits are also split into independent AST sub-hunks—removing individual added `&&` / `||` clauses and added `Key: Value` fields in composite literals—reporting `UNTESTED CHANGE` if the suite still passes.
 - **Weakened-test detection (`--since REV`):** When any selected `*_test.go` file was modified, added, or deleted since `REV` (even if an entire test package directory was deleted), surviving and newly unreached mutations in unchanged production code are replayed against the `REV` tests overlaid onto the current production source. Any mutant that `REV` tests killed is flagged as `WEAKENED TEST`.
 
@@ -252,8 +260,8 @@ Flags must precede package patterns (`targeted-mutation-go analyze [flags] [pack
 | `--since <REV>` | — | Restrict ordinary findings to lines changed since Git `<REV>` and check modified tests for weakening |
 | `--undo-changes` | `false` | Restore modified tracked Go hunks and matched AST sub-hunks to `--since` (requires `--since`) |
 | `--lines <SPEC>` | — | Restrict mutations to `FILE`, `FILE:LINE`, or `FILE:FROM-TO` (repeatable; intersects `--since`) |
-| `--test-package <PKG>` | target patterns | Independent Go package pattern(s) to execute as the test suite (repeatable) |
-| `--test <REGEX>` | — | Filter tests and subtests via Go's `-run` regular expression |
+| `--test-package <PKG>` | target patterns | Independent Go package pattern(s) to execute as the test suite (repeatable; unimported targets are still compile-checked) |
+| `--test <REGEX>` | — | Filter tests and subtests via Go's `-run` regular expression (errors if zero tests match) |
 | `--tags <TAGS>` | — | Comma-separated Go build tags passed to package loading, builds, and `go test` |
 | `--include-generated` | `false` | Also discover mutations in files carrying standard `// Code generated ... DO NOT EDIT.` headers |
 
@@ -263,9 +271,9 @@ Flags must precede package patterns (`targeted-mutation-go analyze [flags] [pack
 | --- | --- | --- |
 | `--full` | `false` | Run comparison probes together with the full source mutation catalogue |
 | `--source-only` | `false` | Run the full catalogue exclusively via isolated per-edit source overlays |
-| `--conventional` | `false` | Disable threshold synthesis and predicted-survivor whole-mutant skipping (incompatible with `--verify-witnesses`) |
+| `--conventional` | `false` | Disable threshold/margin synthesis and predicted-survivor whole-mutant skipping (incompatible with `--verify-witnesses`) |
 | `--comparison <KIND>` | `all` | Filter comparison probe candidates (`all`, `boundary`, or `negation`) |
-| `--exclude-rule <RULE>` | — | Exclude a specific rule name such as `negation`, `empty-block`, or `integer-step` (repeatable) |
+| `--exclude-rule <RULE>` | — | Exclude a specific rule name such as `negation`, `margin`, `empty-block`, or `integer-step` (repeatable) |
 | `--list` | `false` | Preview candidate mutations without compiling or running tests (incompatible with `--baseline`, `--write-baseline`, `--checkpoint`, and `--audit`) |
 
 #### Verification & Suggestions
@@ -284,12 +292,14 @@ Flags must precede package patterns (`targeted-mutation-go analyze [flags] [pack
 | `--format <FMT>` | `text` | Output format: `text`, `json`, `jsonl`, or `sarif` |
 | `--show-unreached` | `false` | Include comparison sites not executed by any selected test binary |
 | `--show-killed` | `false` | Include `killed` mutations in the findings list |
+| `--show-non-viable` | `false` | Include `non-viable` candidates in `text` output |
 | `--baseline <FILE>` | — | Suppress known gap IDs listed in `<FILE>` from output and exit status |
 | `--write-baseline <FILE>` | — | Atomically write current gap IDs from a complete campaign (`incomplete == 0`) to `<FILE>` |
 | `--shard <K/N>` | — | Deterministically assign candidate IDs to zero-based shard `K` of `N` (`0 <= K < N`) |
 | `--checkpoint <FILE>` | — | Lock and resume completed verdicts from a crash-safe JSONL journal when the campaign fingerprint matches |
 | `--jobs <N>` | `min(4, GOMAXPROCS)` | Maximum concurrent build or mutation worker goroutines |
-| `--timeout <DUR>` | `30s` | Per-test-package execution timeout |
+| `--timeout <DUR>` | `max(10s, 5s + 5×baseline)` | Per-test-package timeout (warns on stderr if baseline duration meets or exceeds an explicit `--timeout`) |
+| `--timeout-recheck <MODE>` | `serial` | Recheck parallel worker timeouts serially (`serial`) or leave unconfirmed (`none`) |
 | `--build-timeout <DUR>` | `5m` | Timeout per `go test`, `go list`, or `go test -c` build command |
 
 ---
@@ -298,22 +308,22 @@ Flags must precede package patterns (`targeted-mutation-go analyze [flags] [pack
 
 ```mermaid
 flowchart LR
-    A["Load & Type-Check Packages<br/>(go/packages)"] --> B["Ordinary Suite Baseline<br/>(go test -json)"]
+    A["Load & Type-Check Packages<br/>(go/packages)"] --> B["Ordinary Suite Baseline<br/>(go test -json + adaptive timeout)"]
     B --> C["Build Probe Binaries<br/>(1 go test -c -overlay per consumer)"]
-    C --> D["Record Baseline Trace<br/>(mmap 24B/site atomic summary)"]
-    D --> E["Plan & Prune Candidates<br/>(rank intervals + attainability)"]
+    C --> D["Record Baseline Trace<br/>(mmap 40B/site atomic summary)"]
+    D --> E["Plan & Prune Candidates<br/>(thresholds, margins, holes, floats)"]
     E -->|"Observations agree"| F["INPUT GAP [observed]<br/>(0 replays)"]
-    E -->|"Observations diverge"| G["Isolated Binary Replay<br/>(private mmap trace)"]
+    E -->|"Observations diverge"| G["Isolated Binary Replay<br/>(+ serial timeout recheck)"]
     G --> H["KILLED or ASSERTION GAP"]
-    D -->|"--full non-probe edits"| I["Source Overlay Workers<br/>(+ unused import/var repair)"]
+    D -->|"--full non-probe / unreached edits"| I["Source Overlay Workers<br/>(+ unused import/var repair)"]
     I --> J["KILLED / SOURCE SURVIVOR / NON VIABLE"]
 ```
 
-1. **Typed package discovery.** Loads target packages with `golang.org/x/tools/go/packages` under the active build tags and `GOOS`/`GOARCH`. Integer comparisons (including named integer types and architecture-sized `int`/`uint`/`uintptr`) are analyzed across statements where operand evaluation order cannot change; `--full` additionally instruments eligible string comparisons.
-2. **Dual baseline verification.** Runs `go test -json -count=1` (including default `go vet`) on the unmodified suite, then compiles one instrumented `.test` binary per non-skipped consumer package inside a temporary `go -overlay` and verifies that each binary executes the exact same test inventory with identical dispositions.
-3. **Lock-free shared-memory tracing.** During the instrumented baseline run, each comparison site updates a 24-byte `mmap` slot (`Flags`, `Below`, `~Above`) using `sync/atomic` operations, mapping signed integers to monotonic `uint64` ranks via `uint64(v) ^ (1 << 63)`. Safe under `t.Parallel()` and nested subtests.
-4. **Interval planning & verified activation.** From `Below`, `Above`, and `Equal` flags, the planner computes the closed interval of observation-equivalent thresholds, skips provable survivors (`observed`), and runs remaining candidates only against consumer binaries whose recorded observations change. Every replay runs in a fresh process group with a private `mmap` trace and must set both the site-reached bit and the decision-changed bit—with an unchanged test inventory on `PASS`—before being classified as `ASSERTION GAP` or `KILLED`.
-5. **Hybrid `--full` routing & source repair.** In `--full` mode, comparison operator swaps, `±1` literal steps on comparison constants, `!(cond)` negations, and side-effect-free `true`/`false` comparison replacements reuse the prebuilt probe binaries (`replayed` / `observed`), falling back to a source overlay only if unconfirmed. Remaining source edits materialize files lazily inside worker goroutines from shared immutable byte snapshots and retry once if the edit leaves an unused local variable (`_ = &x`) or unused import (`_ "pkg"`), preserving initializer and package `init` side effects.
+1. **Typed package discovery.** Loads target packages with `golang.org/x/tools/go/packages` under the active build tags and `GOOS`/`GOARCH`. Integer comparisons (including named integer types, `int`/`uint`/`uintptr`, and built-in `len`/`cap`) and float comparisons (`float32`/`float64`) are instrumented where evaluation order cannot change; `--full` additionally instruments string comparisons. Synthetic probe files are named to sort before all package `.go` files and use zero-initialized lazy state so Go package-level `var` initialization order is never altered.
+2. **Dual baseline verification & adaptive timeout.** Runs `go test -json -count=1` (including default `go vet`), derives an adaptive per-package timeout (`max(10s, 5s + 5×baseline)` when `--timeout` is unset), compiles one instrumented `.test` binary per non-skipped consumer package inside a temporary `go -overlay`, and verifies identical test inventories.
+3. **Lock-free shared-memory tracing.** During the baseline run, each comparison site updates a 40-byte `mmap` slot (`Flags` including IEEE-754 `Unordered` bit `32` for `NaN`, `Below`, `~Above`, `~BelowGap`, `~AboveGap`) using Go 1.18-compatible `sync/atomic` compare-and-swap loops, mapping signed integers to monotonic `uint64` ranks via `uint64(v) ^ (1 << 63)`.
+4. **Interval/margin planning, verified activation & process cleanup.** From recorded extrema and rank gaps, the planner computes observation-equivalent threshold intervals (jumping across impossible bitmask holes and exact small-modulus remainders) and overflow-free variable-RHS margins (`a >= b ± 1`), skipping provable survivors (`observed`). Remaining candidates run in dedicated process groups (`Setpgid`) with private `mmap` traces; process groups are terminated (`SIGKILL`) after every normal or timed-out exit. Parallel timeouts are rechecked serially (`--timeout-recheck serial`), and probe timeouts confirmed to have reached and flipped the comparison (`flags & 24 == 24`) are counted as `killed` (`timed_out`).
+5. **Hybrid `--full` routing & source repair.** Reached `--full` comparison operator swaps, `±1` literal steps, `!(cond)` negations (excluding ordered float comparisons where `NaN` semantics differ), and side-effect-free `true`/`false` comparison replacements reuse prebuilt probe binaries, falling back to isolated source overlays when unreached or unconfirmed. Source overlays retry once when an edit leaves an unused local variable (`_ = &x`) or import (`_ "pkg"`).
 
 ---
 
@@ -330,9 +340,9 @@ Full methodology, peer versions, and raw timing distributions on macOS arm64 (Go
 ### Soundness assumptions & known limits
 
 - **Deterministic tests:** Observation-based pruning (`observed`) assumes deterministic test execution for the selected build configuration. Nondeterministic replays are flagged as `UNSTABLE` (exit `3`); pass `--verify-survivors` to force binary replays or `--audit N` to cross-check probe verdicts against real source edits.
-- **Conservative probe placement & scope:** Probes target integer comparisons (plus string comparisons under `--full`); threshold synthesis applies when one side is an integer constant (`x >= 5000`, `5000 <= x`), while two-variable integer comparisons (`a >= b`) run boundary and negation probes. Statements containing function or method calls (including built-ins such as `len(xs)` other than type conversions), channel receives (`<-ch`), closures, compiler directives (`//go:...`), compile-time constant expressions, array-length `range` loops without a value variable, floats, generated files (unless `--include-generated`), and cgo-transformed files are left out of probe rewriting so evaluation order and compile-time semantics never change. Pass `--full` or `--source-only` to cover call-bearing expressions, floats, and cgo packages via source overlays.
+- **Conservative probe placement:** Statements containing general function or method calls (other than type conversions and built-in `len`/`cap` on side-effect-free operands), channel receives (`<-ch`), closures, compiler directives (`//go:...`), compile-time constant expressions, array-length `range` loops without a value variable, generated files (unless `--include-generated`), and cgo-transformed files are left out of probe rewriting so evaluation order and compile-time semantics never change. Pass `--full` or `--source-only` to cover general call-bearing expressions and cgo packages via source overlays. Float probes test boundary (`<` ↔ `<=`, `>` ↔ `>=`) and negation changes rather than ULP-level threshold shifts.
 - **Environment & workspace rules:** Native probe `mmap` execution requires Linux or macOS. Subprocesses strip `TMT_GO_TRACE` and `TMT_GO_MUTATION` during builds, and tests that scrub their own environment before re-executing the test binary should use `--source-only`. Only compatible flags (`-a`, `-asan`, `-buildvcs`, `-msan`, `-p`, `-race`, `-tags`, `-trimpath`, `-mod=readonly`, `-mod=vendor`) are accepted in `GOFLAGS`; pass `-tags` and `-timeout` via CLI flags. At a `go.work` root that has no root `go.mod`, pass explicit module patterns such as `./app/... ./lib/...`.
-- **Checkpoint invalidation:** `--checkpoint` hashes the `targeted-mutation-go` binary, CLI flags, Go toolchain/environment, `--since` commit, workspace files, and `go list -deps -test` inputs; changing any of them rejects the journal rather than mixing stale verdicts.
+- **Checkpoint invalidation:** `--checkpoint` hashes the `targeted-mutation-go` binary, CLI flags, Go toolchain/environment, `--since` commit, workspace files (handling symlinks and ignoring `.git`, `.worktree`, `node_modules`, and `docs.local`), and `go list -deps -test` inputs, with sorted baseline test inventories so `t.Parallel()` ordering never invalidates cached verdicts.
 
 ---
 
@@ -340,7 +350,7 @@ Full methodology, peer versions, and raw timing distributions on macOS arm64 (Go
 
 CI ([.github/workflows/ci.yml](.github/workflows/ci.yml)) runs `go test`, `go vet`, and `go test -race` across Go 1.26 and 1.27 on Ubuntu and macOS (plus self-mutation gating on Ubuntu / Go 1.27), alongside a dedicated Ubuntu formal-verification job for Lean 4, TLC, and PICT:
 
-- **Lean 4** ([verification/lean/Threshold.lean](verification/lean/Threshold.lean)): proves adjacent-threshold distinguishing ranks, observation-extremum sufficiency, two's-complement sign-bit ranking (`x + 2^63`), 3-bit comparison masks under operand reversal, bitmask zero-bits, and signed/unsigned remainder bounds.
+- **Lean 4** ([verification/lean/Threshold.lean](verification/lean/Threshold.lean)): proves adjacent-threshold distinguishing ranks, observation-extremum sufficiency, two's-complement sign-bit ranking (`x + 2^63`) and overflow-free rank differences, 3-bit comparison masks under operand reversal, bitmask zero-bits, $O(1)$ `prevMaskedStep` / `nextMaskedStep` hole-jumping exactness, and signed/unsigned remainder bounds.
 - **TLA+ / TLC** ([verification/tla/](verification/tla/) & [internal/reporting/formal/](internal/reporting/formal/)): model-checks worker concurrency and activation evidence (`Campaign.tla`), hybrid probe/source fallback and bounded repair retries (`SourceReplay.tla`), crash-safe locked checkpoint journals (`Checkpoint.tla`), isolated test attribution (`Suggestion.tla`), 4-step source witness verification (`SourceWitness.tla`), previous-test comparison (`Weakened.tla`), and atomic baseline publication (`BaselineSnapshot.tla`).
 - **Combinatorial & self-mutation testing:** 18 PICT models ([verification/pict/](verification/pict/)) verified for exhaustive pairwise + seed coverage by `scripts/check-pict.py`, plus planner self-mutation gating via `scripts/check-mutants.py`.
 
