@@ -97,10 +97,6 @@ func Execute(ctx context.Context, args []string, out, errOut io.Writer) int {
 		fmt.Fprintln(errOut, "--verify-witnesses is incompatible with --conventional")
 		return 1
 	}
-	if cfg.SourceOnly && cfg.VerifyWitnesses {
-		fmt.Fprintln(errOut, "--verify-witnesses is incompatible with --source-only")
-		return 1
-	}
 	if cfg.List && (*baselinePath != "" || *writeBaselinePath != "") {
 		fmt.Fprintln(errOut, "baselines apply to evaluated findings, not --list")
 		return 1
@@ -217,6 +213,11 @@ func writeText(out io.Writer, report campaign.Report) error {
 				text.WriteString(" [verified]")
 			}
 			text.WriteByte('\n')
+			writeSuggestion(&text, witness.Code)
+		}
+		if witness := finding.SourceWitness; witness != nil {
+			fmt.Fprintf(&text, "  verified with %s (original %s, mutant %s)\n", witness.Call, witness.Original, witness.Mutated)
+			writeSuggestion(&text, witness.Code)
 		}
 		if len(finding.Packages) != 0 {
 			fmt.Fprintf(&text, "  test packages: %s\n", strings.Join(finding.Packages, ", "))
@@ -237,4 +238,12 @@ func writeText(out io.Writer, report campaign.Report) error {
 		report.Sites, report.Builds, report.Replays, report.Skipped, report.SourceRuns, report.Killed, report.Unreached, report.Rejected, report.Incomplete)
 	_, err := io.WriteString(out, text.String())
 	return err
+}
+
+func writeSuggestion(out *strings.Builder, code string) {
+	if code != "" {
+		for line := range strings.SplitSeq(strings.TrimSpace(code), "\n") {
+			fmt.Fprintf(out, "    %s\n", line)
+		}
+	}
 }

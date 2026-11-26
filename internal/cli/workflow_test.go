@@ -226,6 +226,84 @@ func TestCLIResumesCompletedResultsAndRejectsChangedTests(t *testing.T) {
 	}
 }
 
+func TestCLIVerifiesConcreteSourceWitness(t *testing.T) {
+	dir := t.TempDir()
+	writeFiles(t, dir, map[string]string{
+		"go.mod":        "module example.org/sourcewitness\n\ngo 1.26.0\n",
+		"affix.go":      "package sourcewitness\nimport \"strings\"\nfunc Match(s string) bool { return strings.HasPrefix(s, \"needle\") }\n",
+		"affix_test.go": "package sourcewitness\nimport \"testing\"\nfunc TestMatch(t *testing.T) { if !Match(\"needle\") { t.Fatal(\"prefix\") } }\n",
+	})
+	r, code := analyzeJSON(t, dir, "--source-only", "--verify-witnesses", ".")
+	if code != 2 {
+		t.Fatalf("exit %d, report %+v", code, r)
+	}
+	for _, f := range r.Findings {
+		if f.Rule == "affix-contains" {
+			if f.Status != "source-survivor" || f.SourceWitness == nil || !f.SourceWitness.Verified ||
+				f.SourceWitness.Original != "false" || f.SourceWitness.Mutated != "true" || !strings.Contains(f.SourceWitness.Code, "Match(") {
+				t.Fatalf("missing concrete source witness: %+v", f)
+			}
+			return
+		}
+	}
+	t.Fatalf("missing affix mutant: %+v", r)
+}
+
+func TestCLIRecognizesWeakenedTestsSinceRevision(t *testing.T) {
+	data, err := os.ReadFile("../../verification/pict/weakened.tsv")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, row := range strings.Split(strings.TrimSpace(string(data)), "\n")[1:] {
+		fields := strings.Fields(row)
+		t.Run(strings.Join(fields, "/"), func(t *testing.T) {
+			dir := t.TempDir()
+			const testPrefix = "package weakened\nimport \"testing\"\nfunc TestReady(t *testing.T) { "
+			const strong = `if !Ready(1) { t.Fatal("boundary") }`
+			old := strong
+			if fields[0] == "broken" {
+				old = `t.Fatal("baseline broken")`
+			}
+			writeFiles(t, dir, map[string]string{
+				"go.mod":        "module example.org/weakened\n\ngo 1.26.0\n",
+				"limit.go":      "package weakened\nfunc Ready(x int) bool { return x >= 1 }\n",
+				"limit_test.go": testPrefix + old + " }\n",
+			})
+			runGit(t, dir, "init", "-q")
+			runGit(t, dir, "add", ".")
+			runGit(t, dir, "-c", "user.name=TMT Test", "-c", "user.email=tmt@example.invalid", "-c", "commit.gpgsign=false", "commit", "-qm", "base")
+			current := map[string]string{"loose": `if !Ready(2) { t.Fatal("loose") }`, "unreached": "", "detects": strong + " // still checks the boundary\n"}[fields[1]]
+			writeFiles(t, dir, map[string]string{"limit_test.go": testPrefix + current + " }\n"})
+			args := []string{"--since=HEAD", "--comparison=boundary"}
+			if fields[2] == "source" {
+				args = append(args, "--source-only")
+			}
+			r, code := analyzeJSON(t, dir, append(args, ".")...)
+			want := 2
+			if fields[0] == "broken" {
+				want = 3
+			} else if fields[1] == "detects" {
+				want = 0
+			}
+			if code != want {
+				t.Fatalf("exit %d want %d, report %+v", code, want, r)
+			}
+			weakened := false
+			for _, f := range r.Findings {
+				if f.Status == "weakened-test" && (f.Rule == "boundary" || f.Rule == "source-operator" && f.Mutation == ">") {
+					weakened = len(f.Tests) == 1 && f.Tests[0] == "TestReady"
+				}
+				if f.Status == "input-gap" || f.Status == "source-survivor" {
+					t.Fatalf("ordinary finding outside the diff: %+v", f)
+				}
+			}
+			if weakened != (want == 2) {
+				t.Fatalf("unexpected weakened classification with exit %d: %+v", code, r.Findings)
+			}
+		})
+	}
+}
+
 func TestCLISelectsMutationSitesAndTestsIndependently(t *testing.T) {
 	data, err := os.ReadFile("../../verification/pict/selection.tsv")
 	if err != nil {

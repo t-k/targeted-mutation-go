@@ -17,6 +17,57 @@ type witnessJob struct {
 	probe probeJob
 }
 
+func (s *session) verifySourceWitnesses(ctx context.Context, report *Report) {
+	if len(s.sources) == 0 {
+		return
+	}
+	jobs := make(map[string]sourceJob, len(s.sources))
+	for _, job := range s.sources {
+		if job.edit != nil {
+			jobs[job.finding.ID] = job
+		}
+	}
+	var candidates []int
+	for i, f := range report.Findings {
+		if _, present := jobs[f.ID]; present && f.Status == "source-survivor" {
+			candidates = append(candidates, i)
+		}
+	}
+	slices.SortStableFunc(candidates, func(a, b int) int {
+		aRule, bRule := report.Findings[a].Rule, report.Findings[b].Rule
+		if order := sourceWitnessPriority(aRule) - sourceWitnessPriority(bRule); order != 0 {
+			return order
+		}
+		return compareFindings(report.Findings[a], report.Findings[b])
+	})
+	candidates = candidates[:min(8, len(candidates))]
+	type result struct {
+		witness *SourceWitness
+		err     error
+	}
+	results := parallel(ctx, min(2, s.cfg.Jobs), len(candidates), func(i int) result {
+		witness, err := s.sourceWitness(ctx, jobs[report.Findings[candidates[i]].ID])
+		return result{witness, err}
+	})
+	for i, tested := range results {
+		f := &report.Findings[candidates[i]]
+		if tested.err != nil {
+			f.Detail = "source witness verification: " + tested.err.Error()
+			report.Incomplete++
+		} else {
+			f.SourceWitness = tested.witness
+		}
+	}
+}
+
+func sourceWitnessPriority(rule string) int {
+	switch rule {
+	case "min-max", "rounding-mode", "affix-contains", "affix-end", "replacement-count", "search-direction", "slice-element-remove", "integer-rounding-order":
+		return 0
+	}
+	return 1
+}
+
 func (s *session) verifyWitnesses(ctx context.Context, report *Report, probes []probeJob) {
 	byLocation := make(map[string]probeJob)
 	for _, probe := range probes {

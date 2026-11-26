@@ -2,9 +2,11 @@ package campaign
 
 import (
 	"context"
+	"fmt"
 	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 
 	"github.com/t-k/targeted-mutation-go/internal/analysis"
 	"github.com/t-k/targeted-mutation-go/internal/target"
@@ -90,7 +92,8 @@ func (s *session) runSource(ctx context.Context, job sourceJob, baseline command
 	}
 	defer os.RemoveAll(dir)
 	file := job.materialize()
-	overlay, err := makeOverlay(dir, []target.Replacement{file})
+	files := slices.Concat(s.testOverlays, []target.Replacement{file})
+	overlay, err := makeOverlay(dir, files)
 	if err != nil {
 		result.err = err
 		return result
@@ -101,7 +104,7 @@ func (s *session) runSource(ctx context.Context, job sourceJob, baseline command
 	result.runs = 1
 	var diagnostics []compilerDiagnostic
 	if run.kind == "build-error" && job.edit != nil {
-		overlayFile := filepath.Join(dir, "source-0.go")
+		overlayFile := filepath.Join(dir, fmt.Sprintf("source-%d.go", len(s.testOverlays)))
 		diagnostics = candidateDiagnostics(run, s.cfg.Dir, overlayFile)
 		if repaired := repairUnused(file.Data, overlayFile, diagnostics); repaired != nil {
 			if err := os.WriteFile(overlayFile, repaired, 0600); err != nil {

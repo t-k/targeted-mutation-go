@@ -82,6 +82,7 @@ type session struct {
 	shard        shardSelection
 	journal      *checkpoint.Journal[Finding]
 	baselineKey  string
+	testOverlays []target.Replacement
 }
 
 func Run(ctx context.Context, cfg Config) (Report, error) {
@@ -113,8 +114,8 @@ func Run(ctx context.Context, cfg Config) (Report, error) {
 	if cfg.UndoChanges && cfg.Since == "" {
 		return report, fmt.Errorf("undo-changes requires since")
 	}
-	if cfg.VerifyWitnesses && (cfg.Conventional || cfg.SourceOnly) {
-		return report, fmt.Errorf("verify-witnesses requires targeted analysis")
+	if cfg.VerifyWitnesses && cfg.Conventional {
+		return report, fmt.Errorf("verify-witnesses is incompatible with conventional analysis")
 	}
 	shard, err := parseShard(cfg.Shard)
 	if err != nil {
@@ -130,8 +131,9 @@ func Run(ctx context.Context, cfg Config) (Report, error) {
 	if err != nil {
 		return report, err
 	}
+	var selected target.Scope
 	if len(cfg.Lines) != 0 {
-		selected, err := explicitScope(cfg.Dir, cfg.Lines)
+		selected, err = explicitScope(cfg.Dir, cfg.Lines)
 		if err != nil {
 			return report, err
 		}
@@ -140,6 +142,20 @@ func Run(ctx context.Context, cfg Config) (Report, error) {
 			reversions[dir] = slices.DeleteFunc(entries, func(entry target.Replacement) bool {
 				return !selected.Contains(entry.Path, entry.Line, entry.EndLine)
 			})
+		}
+	}
+	productionScope := scope
+	var previous []target.Replacement
+	var testPackages []target.Package
+	if cfg.Since != "" && !cfg.List {
+		setup, cancel := context.WithTimeout(ctx, cfg.BuildTimeout)
+		previous, testPackages, err = previousTestSelection(setup, cfg)
+		cancel()
+		if err != nil {
+			return report, err
+		}
+		if len(previous) != 0 {
+			scope = selected
 		}
 	}
 	setup, cancel = context.WithTimeout(ctx, cfg.BuildTimeout)
@@ -155,7 +171,9 @@ func Run(ctx context.Context, cfg Config) (Report, error) {
 	}
 	defer os.RemoveAll(scratch)
 	s := session{cfg: cfg, env: env, scratch: scratch, packages: packages, testPackages: packages, shard: shard}
-	if len(cfg.TestPatterns) != 0 && !cfg.List {
+	if testPackages != nil {
+		s.testPackages = testPackages
+	} else if len(cfg.TestPatterns) != 0 && !cfg.List {
 		setup, cancel := context.WithTimeout(ctx, cfg.BuildTimeout)
 		s.testPackages, err = resolveTestPackages(setup, cfg)
 		cancel()
@@ -263,11 +281,17 @@ func Run(ctx context.Context, cfg Config) (Report, error) {
 		}
 		report.add(item.finding, cfg.KilledFindings)
 	}
+	if len(previous) != 0 {
+		if err := s.comparePrevious(ctx, &report, productionScope, previous, reached); err != nil {
+			return report, err
+		}
+	}
 	if cfg.SuggestAssertions {
 		s.suggestAssertions(ctx, &report, probeJobs)
 	}
 	if cfg.VerifyWitnesses || cfg.SuggestAssertions {
 		s.verifyWitnesses(ctx, &report, probeJobs)
+		s.verifySourceWitnesses(ctx, &report)
 	}
 	if err := s.validateSnapshots(); err != nil {
 		return report, err
@@ -327,8 +351,12 @@ func (s *session) collect(reverts map[string][]target.Replacement) []target.Repl
 			if !slices.Contains(pkg.Paths, entry.Path) {
 				continue
 			}
-			finding := Finding{File: s.rel(entry.Path), Line: entry.Line, Column: 1,
-				Rule: "revert", Mutation: "restore previous Git hunk"}
+			mutation := entry.Description
+			if mutation == "" {
+				mutation = "restore previous Git hunk"
+			}
+			finding := Finding{File: s.rel(entry.Path), Line: entry.Line, Column: max(1, entry.Column),
+				Rule: "revert", Mutation: mutation}
 			s.identify(&finding)
 			if s.enabled(finding) {
 				s.sources = append(s.sources, sourceJob{replacement: entry, finding: finding})
@@ -634,7 +662,7 @@ func (r *Report) add(f Finding, killedFindings bool) {
 		if !killedFindings {
 			return
 		}
-	case "input-gap", "assertion-gap", "source-survivor", "untested-change":
+	case "input-gap", "assertion-gap", "source-survivor", "untested-change", "weakened-test":
 	case "non-viable":
 		r.Rejected++
 	default:

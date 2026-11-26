@@ -1,0 +1,8 @@
+Prior	Current	Mode
+passing	loose	probe
+passing	unreached	probe
+passing	loose	source
+passing	detects	probe
+broken	loose	probe
+broken	unreached	source
+broken	detects	source
