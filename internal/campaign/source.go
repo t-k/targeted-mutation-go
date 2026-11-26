@@ -204,7 +204,7 @@ func (s *session) runSource(ctx context.Context, job sourceJob, baseline command
 }
 
 func (s *session) compilePackageOverlay(ctx context.Context, dir, overlay, pkgPath string) commandResult {
-	outBin := filepath.Join(dir, "compile-check.test")
+	outBin := filepath.Join(dir, "compile-check.test"+exeSuffix())
 	defer os.Remove(outBin)
 	args := []string{"test", "-json", "-c", "-o", outBin, "-p=1", "-vet=off", "-overlay=" + overlay}
 	args = append(args, s.buildFlags()...)

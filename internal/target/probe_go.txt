@@ -55,11 +55,7 @@ func PROBEOpen() PROBEState {
 	if err != nil {
 		panic(err)
 	}
-	data, err := PROBEsyscall.Mmap(int(f.Fd()), 0, int(info.Size()), PROBEsyscall.PROT_READ|PROBEsyscall.PROT_WRITE, PROBEsyscall.MAP_SHARED)
-	if err != nil {
-		panic(err)
-	}
-	state.slots = PROBEunsafe.Slice((*uint64)(PROBEunsafe.Pointer(&data[0])), len(data)/8)
+	state.slots = PROBEMmap(f, info.Size())
 	if mode := PROBEos.Getenv("TMT_GO_MUTATION"); mode != "" {
 		fields := PROBEstrings.Split(mode, ":")
 		if len(fields) != 4 {

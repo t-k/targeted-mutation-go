@@ -663,7 +663,7 @@ func (s *session) prepare(ctx context.Context, base commandResult, report *Repor
 		}
 		consumer := consumer{
 			pkg: pkg.Path, dir: s.testDirectory(pkg),
-			binary: filepath.Join(s.scratch, fmt.Sprintf("package-%d.test", i)),
+			binary: filepath.Join(s.scratch, fmt.Sprintf("package-%d.test%s", i, exeSuffix())),
 		}
 		s.consumers = append(s.consumers, consumer)
 	}

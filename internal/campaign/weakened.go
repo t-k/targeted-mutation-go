@@ -271,7 +271,7 @@ func (s *session) goTestWithVirtualPackages(ctx context.Context, overlay string,
 	}
 	defer os.RemoveAll(dir)
 	for i, pkg := range virtual {
-		bin := consumer{pkg: pkg.Path, dir: s.testDirectory(pkg), binary: filepath.Join(dir, fmt.Sprintf("test-%d", i))}
+		bin := consumer{pkg: pkg.Path, dir: s.testDirectory(pkg), binary: filepath.Join(dir, fmt.Sprintf("test-%d%s", i, exeSuffix()))}
 		if err := s.buildTest(ctx, overlay, &bin, 1, true); err != nil {
 			return commandResult{kind: "error", detail: err.Error()}
 		}

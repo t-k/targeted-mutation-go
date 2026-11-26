@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sync"
 	"unicode/utf8"
 )
@@ -157,6 +158,9 @@ func decodeResult[T any](data []byte) (T, error) {
 }
 
 func syncParent(path string) error {
+	if runtime.GOOS == "windows" {
+		return nil
+	}
 	dir, err := os.Open(filepath.Dir(path))
 	if err != nil {
 		return err
@@ -230,6 +234,9 @@ func (j *Journal[T]) Put(key string, result T) error {
 }
 
 func (j *Journal[T]) persist(line []byte) error {
+	if _, err := j.file.Seek(0, io.SeekEnd); err != nil {
+		return err
+	}
 	if _, err := j.file.Write(line); err != nil {
 		return err
 	}

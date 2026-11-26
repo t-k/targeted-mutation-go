@@ -1,0 +1,13 @@
+
+func PROBEMmap(f *PROBEos.File, size int64) []uint64 {
+	h, err := PROBEsyscall.CreateFileMapping(PROBEsyscall.Handle(f.Fd()), nil, PROBEsyscall.PAGE_READWRITE, uint32(uint64(size)>>32), uint32(size), nil)
+	if err != nil {
+		panic(err)
+	}
+	defer PROBEsyscall.CloseHandle(h)
+	addr, err := PROBEsyscall.MapViewOfFile(h, PROBEsyscall.FILE_MAP_WRITE, 0, 0, uintptr(size))
+	if err != nil {
+		panic(err)
+	}
+	return PROBEunsafe.Slice((*uint64)(PROBEunsafe.Pointer(addr)), int(size)/8)
+}

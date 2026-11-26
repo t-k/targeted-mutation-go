@@ -3,6 +3,7 @@ package target
 import (
 	_ "embed"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 )
@@ -11,6 +12,12 @@ const BytesPerSite = 40
 
 //go:embed probe_go.txt
 var probeSource string
+
+//go:embed probe_mmap_unix.go.txt
+var unixMmapProbeSource string
+
+//go:embed probe_mmap_windows.go.txt
+var windowsMmapProbeSource string
 
 //go:embed probe_string.go.txt
 var stringProbeSource string
@@ -35,7 +42,16 @@ type Replacement struct {
 }
 
 func Runtime(pkg Package) []Replacement {
+	return runtimeForGOOS(pkg, runtime.GOOS)
+}
+
+func runtimeForGOOS(pkg Package, goos string) []Replacement {
 	source := probeSource
+	if goos == "windows" {
+		source += windowsMmapProbeSource
+	} else {
+		source += unixMmapProbeSource
+	}
 	if slices.ContainsFunc(pkg.Files, func(file *File) bool {
 		return slices.ContainsFunc(file.Sites, func(site *Site) bool { return site.String })
 	}) {

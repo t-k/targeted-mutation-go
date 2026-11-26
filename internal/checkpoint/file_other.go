@@ -1,4 +1,4 @@
-//go:build !darwin && !linux
+//go:build !darwin && !linux && !windows
 
 package checkpoint
 
@@ -8,5 +8,5 @@ import (
 )
 
 func openLocked(path string) (*os.File, error) {
-	return nil, &os.PathError{Op: "open checkpoint", Path: path, Err: errors.New("checkpoints require Linux or macOS")}
+	return nil, &os.PathError{Op: "open checkpoint", Path: path, Err: errors.New("checkpoints require Linux, macOS, or Windows")}
 }

@@ -5,9 +5,9 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
-	"syscall"
 	"testing"
 
 	"github.com/t-k/targeted-mutation-go/internal/campaign"
@@ -518,10 +518,10 @@ func TestSpawn(t *testing.T) {
 	if err != nil || pid <= 0 {
 		t.Fatalf("invalid child PID %q: %v", rawPID, err)
 	}
-	if err := syscall.Kill(pid, 0); err == nil {
-		_ = syscall.Kill(pid, syscall.SIGKILL)
-		t.Fatalf("orphan child process %d survived after campaign finished", pid)
+	if runtime.GOOS == "windows" {
+		return
 	}
+	assertOrphanReaped(t, pid)
 }
 
 func TestCLIReviewRound2Regressions(t *testing.T) {

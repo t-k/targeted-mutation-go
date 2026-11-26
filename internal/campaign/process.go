@@ -57,13 +57,20 @@ func environment(ctx context.Context, dir string) (goEnvironment, error) {
 		return env, fmt.Errorf("target GOOS/GOARCH is %s/%s, test binaries must run locally on %s/%s",
 			env.GOOS, env.GOARCH, runtime.GOOS, runtime.GOARCH)
 	}
-	if env.GOOS != "linux" && env.GOOS != "darwin" {
-		return env, fmt.Errorf("native probe execution requires Linux or macOS")
+	if env.GOOS != "linux" && env.GOOS != "darwin" && env.GOOS != "windows" {
+		return env, fmt.Errorf("native probe execution requires Linux, macOS, or Windows")
 	}
 	if err := checkGoFlags(env.GOFLAGS); err != nil {
 		return env, err
 	}
 	return env, nil
+}
+
+func exeSuffix() string {
+	if runtime.GOOS == "windows" {
+		return ".exe"
+	}
+	return ""
 }
 
 func checkGoFlags(raw string) error {

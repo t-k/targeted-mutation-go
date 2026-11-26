@@ -865,3 +865,40 @@ func TestTargetBoundaryConditions(t *testing.T) {
 		t.Fatal("expected errorf-unwrap on raw `%w` literal")
 	}
 }
+
+func TestWindowsProbeRuntimeCrossCompiles(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "go.mod", "module example.org/winprobe\n\ngo 1.18\n")
+	pkg := Package{
+		Name:   "winprobe",
+		Dir:    dir,
+		Prefix: "tmtGoWin",
+		Paths:  []string{filepath.Join(dir, "sample.go")},
+		Files: []*File{{
+			Path: filepath.Join(dir, "sample.go"),
+			Sites: []*Site{
+				{ID: 0},
+				{ID: 1, String: true},
+				{ID: 2, Float: true},
+				{ID: 3, Arith: true, ArithOp: 1},
+				{ID: 4, Bool: true},
+			},
+		}},
+	}
+	rt := runtimeForGOOS(pkg, "windows")
+	if len(rt) != 1 {
+		t.Fatalf("expected 1 runtime file, got %d", len(rt))
+	}
+	if !strings.Contains(string(rt[0].Data), "CreateFileMapping") || !strings.Contains(string(rt[0].Data), "MapViewOfFile") {
+		t.Fatalf("windows runtime missing CreateFileMapping/MapViewOfFile")
+	}
+	write(t, dir, filepath.Base(rt[0].Path), string(rt[0].Data))
+	write(t, dir, "sample.go", "package winprobe\nfunc Touch() { _ = tmtGoWinCompare(0, 1, 1, 2) }\n")
+
+	cmd := exec.Command("go", "build", ".")
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(), "GOOS=windows", "GOARCH=amd64", "CGO_ENABLED=0")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("windows probe runtime cross-compile failed: %v\n%s", err, out)
+	}
+}

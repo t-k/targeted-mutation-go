@@ -1,0 +1,8 @@
+
+func PROBEMmap(f *PROBEos.File, size int64) []uint64 {
+	data, err := PROBEsyscall.Mmap(int(f.Fd()), 0, int(size), PROBEsyscall.PROT_READ|PROBEsyscall.PROT_WRITE, PROBEsyscall.MAP_SHARED)
+	if err != nil {
+		panic(err)
+	}
+	return PROBEunsafe.Slice((*uint64)(PROBEunsafe.Pointer(&data[0])), len(data)/8)
+}
