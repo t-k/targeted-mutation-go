@@ -199,7 +199,7 @@ func findFunctionSites(file *File, fn *ast.FuncDecl, positions *token.File, pkg 
 				}
 			}
 			if full {
-				appendEdits(file, positions, expr, pkg.TypesInfo)
+				appendEdits(file, positions, expr, pkg)
 			}
 		}
 		return true
@@ -406,7 +406,7 @@ func operator(op token.Token) analysis.Operator {
 	return 0
 }
 
-func appendEdits(file *File, positions *token.File, expr *ast.BinaryExpr, info *types.Info) {
+func appendEdits(file *File, positions *token.File, expr *ast.BinaryExpr, pkg *packages.Package) {
 	op := expr.Op
 	var replacements []token.Token
 	if cmp := operator(op); cmp != 0 {
@@ -433,43 +433,18 @@ func appendEdits(file *File, positions *token.File, expr *ast.BinaryExpr, info *
 	}
 	pos := positions.PositionFor(expr.OpPos, false)
 	for _, replacement := range replacements {
-		typ := info.TypeOf(expr)
-		if op == token.ADD && !allTypesMatch(typ, types.IsNumeric) {
-			continue
-		}
-		if value := info.Types[expr.Y].Value; replacement == token.QUO && value != nil &&
-			constant.Compare(value, token.EQL, constant.MakeInt64(0)) &&
-			!allTypesMatch(typ, types.IsFloat|types.IsComplex) {
-			continue
+		// Addition can be string concatenation, and the rules for division by
+		// zero depend on the effective (possibly generic) operand types.
+		if op == token.ADD || replacement == token.QUO {
+			edited := *expr
+			edited.Op = replacement
+			if err := types.CheckExpr(pkg.Fset, pkg.Types, expr.Pos(), &edited, nil); err != nil {
+				continue
+			}
 		}
 		file.Edits = append(file.Edits, Edit{
 			File: file.Path, Line: pos.Line, Column: pos.Column, Start: pos.Offset, End: pos.Offset + len(op.String()),
 			Before: op.String(), After: replacement.String(), Kind: "source-operator",
 		})
 	}
-}
-
-func allTypesMatch(typ types.Type, mask types.BasicInfo) bool {
-	if typ == nil {
-		return false
-	}
-	switch t := typ.Underlying().(type) {
-	case *types.Basic:
-		return t.Info()&mask != 0
-	case *types.Interface:
-		// A type belongs to an intersection only if it satisfies every embedded constraint.
-		for embedded := range t.NumEmbeddeds() {
-			if allTypesMatch(t.EmbeddedType(embedded), mask) {
-				return true
-			}
-		}
-	case *types.Union:
-		for term := range t.Len() {
-			if !allTypesMatch(t.Term(term).Type(), mask) {
-				return false
-			}
-		}
-		return t.Len() != 0
-	}
-	return false
 }

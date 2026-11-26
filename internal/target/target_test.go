@@ -81,15 +81,24 @@ func generic[T ~int](n T) T { return n + 1 }
 func floatZero(n float64) float64 { return n * 0 }
 func complexZero(n complex128) complex128 { return n * 0 }
 func mixed[T ~int | ~string](n T) T { return n + n }
+type S string
+type C interface { int | string; int | S }
+func intersection[T C](n T) T { return n + n }
+func unionZero[T ~int | ~float64](n T) T { return n * 0 }
 `)
 	pkgs, err := Discover(context.Background(), dir, []string{"."}, "", nil, true)
 	if err != nil {
 		t.Fatal(err)
 	}
 	edits := pkgs[0].Files[0].Edits
-	if len(edits) != 4 || edits[0].Line != 2 || edits[0].After != "-" ||
-		edits[1].Line != 5 || edits[1].After != "-" || edits[2].Line != 6 || edits[2].After != "/" ||
-		edits[3].Line != 7 || edits[3].After != "/" {
-		t.Fatalf("unbuildable arithmetic candidates: %+v", edits)
+	want := map[int]string{2: "-", 5: "-", 6: "/", 7: "/", 11: "-", 12: "/"}
+	if len(edits) != len(want) {
+		t.Fatalf("unexpected arithmetic candidates: %+v", edits)
+	}
+	for _, edit := range edits {
+		if want[edit.Line] != edit.After {
+			t.Fatalf("unexpected edit: %+v", edit)
+		}
+		delete(want, edit.Line)
 	}
 }
