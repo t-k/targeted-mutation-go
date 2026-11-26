@@ -20,28 +20,29 @@ import (
 )
 
 type Config struct {
-	Dir              string
-	Patterns         []string
-	TestPatterns     []string
-	Lines            []string
-	TestRun          string
-	ExcludeRules     []string
-	List             bool
-	Shard            string
-	Tags, Since      string
-	Comparison       string
-	Jobs             int
-	Timeout          time.Duration
-	BuildTimeout     time.Duration
-	Full             bool
-	SourceOnly       bool
-	IncludeGenerated bool
-	Conventional     bool
-	VerifySurvivors  bool
-	VerifyWitnesses  bool
-	ShowUnreached    bool
-	UndoChanges      bool
-	KilledFindings   bool
+	Dir               string
+	Patterns          []string
+	TestPatterns      []string
+	Lines             []string
+	TestRun           string
+	ExcludeRules      []string
+	List              bool
+	Shard             string
+	Tags, Since       string
+	Comparison        string
+	Jobs              int
+	Timeout           time.Duration
+	BuildTimeout      time.Duration
+	Full              bool
+	SourceOnly        bool
+	IncludeGenerated  bool
+	Conventional      bool
+	VerifySurvivors   bool
+	VerifyWitnesses   bool
+	SuggestAssertions bool
+	ShowUnreached     bool
+	UndoChanges       bool
+	KilledFindings    bool
 }
 
 type consumer struct {
@@ -228,7 +229,10 @@ func Run(ctx context.Context, cfg Config) (Report, error) {
 		report.Skipped += item.skipped
 		report.add(item.finding, cfg.KilledFindings)
 	}
-	if cfg.VerifyWitnesses {
+	if cfg.SuggestAssertions {
+		s.suggestAssertions(ctx, &report, probeJobs)
+	}
+	if cfg.VerifyWitnesses || cfg.SuggestAssertions {
 		s.verifyWitnesses(ctx, &report, probeJobs)
 	}
 	if err := s.validateSnapshots(); err != nil {
@@ -383,11 +387,17 @@ func (s *session) build(ctx context.Context, overlay string, bin *consumer, jobs
 }
 
 func (s *session) runBinary(ctx context.Context, bin *consumer, trace, mutation, test string) commandResult {
-	args := []string{"-test.v=test2json", "-test.timeout=" + s.cfg.Timeout.String()}
+	pattern := s.cfg.TestRun
 	if test != "" {
-		args = append(args, "-test.run=^"+test+"$")
-	} else if s.cfg.TestRun != "" {
-		args = append(args, "-test.run="+s.cfg.TestRun)
+		pattern = exactTestPattern(test)
+	}
+	return s.runBinaryPattern(ctx, bin, trace, mutation, pattern)
+}
+
+func (s *session) runBinaryPattern(ctx context.Context, bin *consumer, trace, mutation, pattern string) commandResult {
+	args := []string{"-test.v=test2json", "-test.timeout=" + s.cfg.Timeout.String()}
+	if pattern != "" {
+		args = append(args, "-test.run="+pattern)
 	}
 	return runCommand(ctx, s.cfg.Timeout+2*time.Second, bin.dir, binaryEnv(s.env, trace, mutation), bin.binary, args...)
 }
@@ -435,10 +445,13 @@ func (s *session) plan(report *Report, consumers [][]*consumer) []probeJob {
 			seen.Merge(bin.seen[site.ID])
 		}
 		if seen.Flags == 0 {
-			report.Unreached++
-			if s.cfg.ShowUnreached {
-				report.Findings = append(report.Findings, Finding{Status: "unreached",
-					File: s.rel(site.File), Line: site.Line, Column: site.Column, Expression: site.Expression})
+			f := Finding{Status: "unreached", File: s.rel(site.File), Line: site.Line, Column: site.Column, Expression: site.Expression}
+			s.identify(&f)
+			if s.enabled(f) {
+				report.Unreached++
+				if s.cfg.ShowUnreached {
+					report.Findings = append(report.Findings, f)
+				}
 			}
 			continue
 		}
@@ -488,9 +501,7 @@ func (s *session) describe(job probeJob, seen analysis.Summary) Finding {
 			input := rankString(*site.Domain, w)
 			f.Witness = &Witness{Input: input, Operand: site.Left,
 				Original: analysis.Evaluate(site.Op, w, site.Domain.Pivot), Mutant: analysis.Evaluate(c.Op, w, c.Pivot)}
-			if site.Callable != "" {
-				f.Witness.Call = fmt.Sprintf("%s(%s)", site.Callable, input)
-			}
+			f.Witness.Call = witnessCall(site, input)
 			if lo, hi, ok := analysis.ThresholdInterval(site.Op, *site.Domain, seen); ok {
 				f.Interval = []string{rankString(*site.Domain, lo), rankString(*site.Domain, hi)}
 			}

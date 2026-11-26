@@ -39,5 +39,6 @@ type Witness struct {
 	Original bool   `json:"original"`
 	Mutant   bool   `json:"mutant"`
 	Call     string `json:"call,omitempty"`
+	Code     string `json:"code,omitempty"`
 	Verified bool   `json:"verified"`
 }

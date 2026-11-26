@@ -21,16 +21,15 @@ func (s *session) verifyWitnesses(ctx context.Context, report *Report, probes []
 	byLocation := make(map[string]probeJob)
 	for _, probe := range probes {
 		f := probe.finding
-		if f.Witness != nil && f.Witness.Call != "" {
-			byLocation[witnessKey(f)] = probe
-		}
+		byLocation[f.ID] = probe
 	}
 	groups := make(map[string][]witnessJob)
 	for i, finding := range report.Findings {
-		if finding.Status != "input-gap" || finding.Witness == nil || finding.Witness.Call == "" {
+		want := finding.Status == "input-gap" && s.cfg.VerifyWitnesses || finding.Status == "assertion-gap" && s.cfg.SuggestAssertions
+		if !want || finding.Witness == nil || finding.Witness.Call == "" {
 			continue
 		}
-		probe, ok := byLocation[witnessKey(finding)]
+		probe, ok := byLocation[finding.ID]
 		if !ok {
 			continue
 		}
@@ -51,8 +50,8 @@ func (s *session) verifyWitnesses(ctx context.Context, report *Report, probes []
 	}
 }
 
-func witnessKey(f Finding) string {
-	return fmt.Sprintf("%s:%d:%d:%s", f.File, f.Line, f.Column, f.Rule)
+func witnessCode(w *Witness) string {
+	return fmt.Sprintf("if got := %s; got != %t {\n\tt.Fatalf(\"got %%v, want %t\", got)\n}", w.Call, w.Original, w.Original)
 }
 
 func (s *session) verifyWitnessGroup(ctx context.Context, report *Report, pkg target.Package, jobs []witnessJob) error {
@@ -67,8 +66,7 @@ func (s *session) verifyWitnessGroup(ctx context.Context, report *Report, pkg ta
 		job := &jobs[i]
 		job.test = fmt.Sprintf("TestTmt%sWitness%d", pkg.Prefix, i)
 		w := report.Findings[job.index].Witness
-		fmt.Fprintf(&source, "func %s(t *testing.T) {\nif got := %s; got != %t { t.Fatalf(\"witness: got %%v\", got) }\n}\n",
-			job.test, w.Call, w.Original)
+		fmt.Fprintf(&source, "func %s(t *testing.T) {\n%s\n}\n", job.test, witnessCode(w))
 	}
 	path := filepath.Join(pkg.Dir, strings.ToLower(pkg.Prefix)+"_witness_test.go")
 	if _, err := os.Lstat(path); !os.IsNotExist(err) {
@@ -103,6 +101,7 @@ func (s *session) verifyWitnessGroup(ctx context.Context, report *Report, pkg ta
 		f := &report.Findings[job.index]
 		if mutated.kind == "failed" && flags&24 == 24 && slices.Contains(mutated.failed, job.test) {
 			f.Witness.Verified = true
+			f.Witness.Code = witnessCode(f.Witness)
 		} else {
 			f.Detail = "generated witness did not fail on the applied mutant"
 			report.Incomplete++

@@ -59,6 +59,8 @@ type Site struct {
 	Op                      analysis.Operator
 	Domain                  *analysis.Domain
 	Callable                string
+	Arguments               []string
+	InputArgument           int
 	Reversed, String        bool
 	CanDropOperands         bool
 }
@@ -445,10 +447,7 @@ func makeIntegerSite(site *Site, expr *ast.BinaryExpr, fn *ast.FuncDecl, pkg *pa
 	}
 	constrainOperand(site.Domain, variable, pkg.TypesInfo)
 	if id, ok := ast.Unparen(variable).(*ast.Ident); ok && directReturn(fn, expr) {
-		param := fn.Type.Params.List[0].Names[0]
-		if pkg.TypesInfo.Uses[id] == pkg.TypesInfo.Defs[param] {
-			site.Callable = fn.Name.Name
-		}
+		findCallArguments(site, id, fn, pkg.TypesInfo)
 	}
 	return true
 }
@@ -503,12 +502,50 @@ func stringOperands(expr *ast.BinaryExpr, info *types.Info) bool {
 }
 
 func directReturn(fn *ast.FuncDecl, expr *ast.BinaryExpr) bool {
-	if fn.Recv != nil || fn.Type.TypeParams != nil || len(fn.Type.Params.List) != 1 ||
-		len(fn.Type.Params.List[0].Names) != 1 || len(fn.Body.List) != 1 {
+	if fn.Recv != nil || fn.Type.TypeParams != nil || len(fn.Body.List) != 1 {
 		return false
 	}
 	statement, ok := fn.Body.List[0].(*ast.ReturnStmt)
 	return ok && len(statement.Results) == 1 && ast.Unparen(statement.Results[0]) == expr
+}
+
+func findCallArguments(site *Site, input *ast.Ident, fn *ast.FuncDecl, info *types.Info) {
+	object := info.Uses[input]
+	if object == nil || fn.Type.Params.NumFields() > 8 {
+		return
+	}
+	var args []string
+	index := -1
+	for _, field := range fn.Type.Params.List {
+		typ := info.TypeOf(field.Type)
+		if typ == nil || len(field.Names) == 0 {
+			return
+		}
+		basic, ok := typ.Underlying().(*types.Basic)
+		if !ok {
+			return
+		}
+		var zero string
+		switch {
+		case basic.Info()&types.IsNumeric != 0:
+			zero = "0"
+		case basic.Info()&types.IsString != 0:
+			zero = `""`
+		case basic.Info()&types.IsBoolean != 0:
+			zero = "0 != 0"
+		default:
+			return
+		}
+		for _, name := range field.Names {
+			if info.Defs[name] == object {
+				index = len(args)
+			}
+			args = append(args, zero)
+		}
+	}
+	if index >= 0 {
+		site.Callable, site.Arguments, site.InputArgument = fn.Name.Name, args, index
+	}
 }
 
 func operator(op token.Token) analysis.Operator {

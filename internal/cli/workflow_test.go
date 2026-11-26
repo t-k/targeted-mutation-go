@@ -112,6 +112,62 @@ func analyzeJSON(t *testing.T, dir string, args ...string) (campaign.Report, int
 	return report, code
 }
 
+func TestCLIProducesVerifiedSuggestions(t *testing.T) {
+	data, err := os.ReadFile("../../verification/pict/suggestions.tsv")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	var production, tests strings.Builder
+	production.WriteString("package suggestions\n")
+	tests.WriteString("package suggestions\nimport \"testing\"\n")
+	rows := strings.Split(strings.TrimSpace(string(data)), "\n")[1:]
+	for i, row := range rows {
+		fields := strings.Fields(row)
+		params, args := "x int", ""
+		if fields[0] == "extra" {
+			params, args = "x int, tag string", `, "label"`
+		}
+		fmt.Fprintf(&production, "func Case%d(%s) bool { return x >= 18 }\n", i, params)
+		body := fmt.Sprintf("if Case%d(17%s) || !Case%d(20%s) { t.Fatal(\"boundary\") }", i, args, i, args)
+		if fields[1] == "weak-test" {
+			body = fmt.Sprintf("_ = Case%d(18%s)", i, args)
+		}
+		if fields[2] == "nested" {
+			body = `t.Run("nested", func(t *testing.T) { ` + body + ` })`
+		}
+		fmt.Fprintf(&tests, "func TestCase%d(t *testing.T) { %s }\n", i, body)
+	}
+	writeFiles(t, dir, map[string]string{
+		"go.mod": "module example.org/suggestions\n\ngo 1.26.0\n", "real.go": production.String(), "real_test.go": tests.String(),
+	})
+	report, code := analyzeJSON(t, dir, "--verify-witnesses", "--suggest-assertions", "--comparison=boundary", ".")
+	if code != 2 || len(report.Findings) != len(rows) || report.Incomplete != 0 {
+		t.Fatalf("exit %d, report %+v", code, report)
+	}
+	for i, f := range report.Findings {
+		fields := strings.Fields(rows[i])
+		wantCall, wantStatus := fmt.Sprintf("Case%d(18)", i), fields[1]
+		if fields[0] == "extra" {
+			wantCall = fmt.Sprintf(`Case%d(18, "")`, i)
+		}
+		if wantStatus == "weak-test" {
+			wantStatus = "assertion-gap"
+			name := fmt.Sprintf("TestCase%d", i)
+			if fields[2] == "nested" {
+				name += "/nested"
+			}
+			if len(f.Tests) != 1 || f.Tests[0] != name {
+				t.Errorf("%s: tests %v, want %q", rows[i], f.Tests, name)
+			}
+		}
+		if f.Status != wantStatus || f.Witness == nil || !f.Witness.Verified || f.Witness.Call != wantCall ||
+			!strings.Contains(f.Witness.Code, "if got := "+wantCall+"; got != true") {
+			t.Errorf("%s: finding %+v, witness %+v", rows[i], f, f.Witness)
+		}
+	}
+}
+
 func TestCLISelectsMutationSitesAndTestsIndependently(t *testing.T) {
 	data, err := os.ReadFile("../../verification/pict/selection.tsv")
 	if err != nil {

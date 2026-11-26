@@ -59,6 +59,7 @@ func Execute(ctx context.Context, args []string, out, errOut io.Writer) int {
 	options.BoolVar(&cfg.Conventional, "conventional", false, "run boundary and negation mutations without threshold synthesis")
 	options.BoolVar(&cfg.VerifySurvivors, "verify-survivors", false, "replay comparison mutants whose observations predict survival")
 	options.BoolVar(&cfg.VerifyWitnesses, "verify-witnesses", false, "compile and run synthesized witness tests for direct calls")
+	options.BoolVar(&cfg.SuggestAssertions, "suggest-assertions", false, "find affected tests and verify concrete assertion suggestions")
 	options.BoolVar(&cfg.ShowUnreached, "show-unreached", false, "include comparison sites the selected tests did not reach")
 	options.BoolVar(&cfg.UndoChanges, "undo-changes", false, "run tests with each edited Go hunk restored to --since")
 	options.BoolVar(&cfg.KilledFindings, "show-killed", false, "include killed mutants in the report")
@@ -177,7 +178,11 @@ func writeText(out io.Writer, report campaign.Report) error {
 			fmt.Fprintf(&text, "  test packages: %s\n", strings.Join(finding.Packages, ", "))
 		}
 		if len(finding.Tests) != 0 {
-			fmt.Fprintf(&text, "  failing tests: %s\n", strings.Join(finding.Tests, ", "))
+			label := "failing tests"
+			if finding.Status == "assertion-gap" {
+				label = "tests that observed the change"
+			}
+			fmt.Fprintf(&text, "  %s: %s\n", label, strings.Join(finding.Tests, ", "))
 		}
 		if finding.Detail != "" {
 			fmt.Fprintf(&text, "  %s\n", finding.Detail)
