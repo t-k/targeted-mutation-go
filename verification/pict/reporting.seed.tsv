@@ -1,4 +1,5 @@
 Outcome	Path	Known
+audit-disagreement	plain	present
 input-gap	plain	present
 assertion-gap	unicode-column	present
 source-survivor	reserved	absent

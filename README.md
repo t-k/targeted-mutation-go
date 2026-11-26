@@ -23,6 +23,9 @@ INPUT GAP limits.go:3:42
   mutation: price >= 4999 [observed]
   observed-equivalent thresholds: 4801..5000
   add a check for free(4999) == false (mutant: true) [verified]
+    if got := free(4999); got != false {
+        t.Fatalf("got %v, want false", got)
+    }
 ```
 
 For PRs, pass the Git base before the package patterns.
@@ -33,7 +36,7 @@ targeted-mutation-go analyze --since "$base" --format=json ./...
 targeted-mutation-go analyze --since "$base" --undo-changes --full ./...
 ```
 
-`--since` scopes mutation candidates to changed lines, including untracked Go sources. `--undo-changes` restores each edit hunk of an existing file in a separate build overlay. It reports hunks whose restoration still passes the tests. Use `--tags` to select build tags and `--jobs` to control concurrent workers. Run `targeted-mutation-go analyze --help` for options.
+Use `--tags` to select build tags and `--jobs` to control concurrent workers. Run `targeted-mutation-go analyze --help` for options. [PR and CI workflows](#pull-requests-and-ci)
 
 ## Source mutation catalogue
 
