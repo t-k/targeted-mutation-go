@@ -20,20 +20,22 @@ import (
 )
 
 type Config struct {
-	Dir             string
-	Patterns        []string
-	Tags, Since     string
-	Comparison      string
-	Jobs            int
-	Timeout         time.Duration
-	BuildTimeout    time.Duration
-	Full            bool
-	Conventional    bool
-	VerifySurvivors bool
-	VerifyWitnesses bool
-	ShowUnreached   bool
-	UndoChanges     bool
-	KilledFindings  bool
+	Dir              string
+	Patterns         []string
+	Tags, Since      string
+	Comparison       string
+	Jobs             int
+	Timeout          time.Duration
+	BuildTimeout     time.Duration
+	Full             bool
+	SourceOnly       bool
+	IncludeGenerated bool
+	Conventional     bool
+	VerifySurvivors  bool
+	VerifyWitnesses  bool
+	ShowUnreached    bool
+	UndoChanges      bool
+	KilledFindings   bool
 }
 
 type consumer struct {
@@ -97,7 +99,7 @@ func Run(ctx context.Context, cfg Config) (Report, error) {
 	if cfg.UndoChanges && cfg.Since == "" {
 		return report, fmt.Errorf("undo-changes requires since")
 	}
-	if cfg.VerifyWitnesses && cfg.Conventional {
+	if cfg.VerifyWitnesses && (cfg.Conventional || cfg.SourceOnly) {
 		return report, fmt.Errorf("verify-witnesses requires targeted analysis")
 	}
 	setup, cancel := context.WithTimeout(ctx, cfg.BuildTimeout)
@@ -111,7 +113,8 @@ func Run(ctx context.Context, cfg Config) (Report, error) {
 		return report, err
 	}
 	setup, cancel = context.WithTimeout(ctx, cfg.BuildTimeout)
-	packages, err := target.Discover(setup, cfg.Dir, cfg.Patterns, cfg.Tags, scope, cfg.Full)
+	packages, err := target.Discover(setup, cfg.Dir, cfg.Patterns, cfg.Tags, scope,
+		target.Discovery{Full: cfg.Full, SourceOnly: cfg.SourceOnly, IncludeGenerated: cfg.IncludeGenerated})
 	cancel()
 	if err != nil {
 		return report, err

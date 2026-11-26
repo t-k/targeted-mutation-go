@@ -45,6 +45,8 @@ func Execute(ctx context.Context, args []string, out, errOut io.Writer) int {
 	options.DurationVar(&cfg.Timeout, "timeout", 30*time.Second, "timeout per test package process")
 	options.DurationVar(&cfg.BuildTimeout, "build-timeout", 5*time.Minute, "timeout per Go build or Go test command")
 	options.BoolVar(&cfg.Full, "full", false, "also run the source mutation catalogue")
+	options.BoolVar(&cfg.SourceOnly, "source-only", false, "run the full catalogue as source mutations")
+	options.BoolVar(&cfg.IncludeGenerated, "include-generated", false, "also discover mutations in generated Go sources")
 	options.BoolVar(&cfg.Conventional, "conventional", false, "run boundary and negation mutations without threshold synthesis")
 	options.BoolVar(&cfg.VerifySurvivors, "verify-survivors", false, "replay comparison mutants whose observations predict survival")
 	options.BoolVar(&cfg.VerifyWitnesses, "verify-witnesses", false, "compile and run synthesized witness tests for direct calls")
@@ -72,6 +74,10 @@ func Execute(ctx context.Context, args []string, out, errOut io.Writer) int {
 	}
 	if cfg.Conventional && cfg.VerifyWitnesses {
 		fmt.Fprintln(errOut, "--verify-witnesses is incompatible with --conventional")
+		return 1
+	}
+	if cfg.SourceOnly && cfg.VerifyWitnesses {
+		fmt.Fprintln(errOut, "--verify-witnesses is incompatible with --source-only")
 		return 1
 	}
 	cfg.Patterns = options.Args()

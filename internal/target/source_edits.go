@@ -39,10 +39,11 @@ type sourceEdits struct {
 	scope     Scope
 	probed    map[int]bool
 	added     map[editKey]bool
+	rawSource bool
 }
 
-func discoverSourceEdits(file *File, tree *ast.File, positions *token.File, pkg *packages.Package, scope Scope) {
-	edits := sourceEdits{file: file, positions: positions, pkg: pkg, scope: scope, probed: make(map[int]bool), added: make(map[editKey]bool)}
+func discoverSourceEdits(file *File, tree *ast.File, positions *token.File, pkg *packages.Package, scope Scope, rawSource bool) {
+	edits := sourceEdits{file: file, positions: positions, pkg: pkg, scope: scope, probed: make(map[int]bool), added: make(map[editKey]bool), rawSource: rawSource}
 	for _, site := range file.Sites {
 		edits.probed[site.Start] = true
 	}
@@ -60,8 +61,6 @@ func (e *sourceEdits) visit(node ast.Node, ancestors []ast.Node) bool {
 	switch n := node.(type) {
 	case *ast.ImportSpec:
 		return false
-	case *ast.FuncDecl:
-		return !hasCompilerDirective(n)
 	case *ast.BinaryExpr:
 		e.binary(n, parent)
 	case *ast.UnaryExpr:
@@ -365,10 +364,14 @@ func (e *sourceEdits) boolean(node ast.Node, value bool, kind string) {
 }
 
 func (e *sourceEdits) builtin(id *ast.Ident, name string) bool {
-	return id.Name == name && e.pkg.TypesInfo.Uses[id] == types.Universe.Lookup(name)
+	return id.Name == name && ((e.rawSource && e.nameAvailable(id.Pos(), name)) ||
+		e.pkg.TypesInfo.Uses[id] == types.Universe.Lookup(name))
 }
 
 func (e *sourceEdits) nameAvailable(pos token.Pos, name string) bool {
+	if e.rawSource {
+		return e.pkg.Types.Scope().Lookup(name) == nil
+	}
 	if scope := e.pkg.Types.Scope().Innermost(pos); scope != nil {
 		_, obj := scope.LookupParent(name, pos)
 		return obj == types.Universe.Lookup(name)
@@ -410,7 +413,19 @@ func (e *sourceEdits) returns(n *ast.ReturnStmt, ancestors []ast.Node) {
 
 func (e *sourceEdits) returnValue(expr, typeExpr ast.Expr, typ types.Type) {
 	if typ == nil {
-		return
+		if id, ok := typeExpr.(*ast.Ident); ok {
+			obj := e.pkg.Types.Scope().Lookup(id.Name)
+			if obj == nil {
+				obj = types.Universe.Lookup(id.Name)
+			}
+			if name, ok := obj.(*types.TypeName); ok {
+				typ = name.Type()
+			}
+		}
+		if typ == nil {
+			e.returnTypedZero(expr, typeExpr)
+			return
+		}
 	}
 	if basic, ok := typ.Underlying().(*types.Basic); ok {
 		switch {
@@ -452,6 +467,10 @@ func (e *sourceEdits) returnValue(expr, typeExpr ast.Expr, typ types.Type) {
 		!types.AssignableTo(types.Typ[types.UntypedNil], typ) {
 		return
 	}
+	e.returnTypedZero(expr, typeExpr)
+}
+
+func (e *sourceEdits) returnTypedZero(expr, typeExpr ast.Expr) {
 	zero := "*new(" + e.text(typeExpr) + ")"
 	if e.nameAvailable(expr.Pos(), "new") {
 		e.replace(expr, "return-zero", zero)
@@ -491,5 +510,5 @@ func (e *sourceEdits) errorf(n *ast.CallExpr) {
 }
 
 func (e *sourceEdits) check(pos token.Pos, expression ast.Expr) bool {
-	return types.CheckExpr(e.pkg.Fset, e.pkg.Types, pos, expression, nil) == nil
+	return e.rawSource || types.CheckExpr(e.pkg.Fset, e.pkg.Types, pos, expression, nil) == nil
 }

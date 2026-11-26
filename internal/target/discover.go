@@ -67,7 +67,11 @@ type Edit struct {
 	Before, After, Kind string
 }
 
-func Discover(ctx context.Context, dir string, patterns []string, tags string, scope Scope, full bool) ([]Package, error) {
+type Discovery struct {
+	Full, SourceOnly, IncludeGenerated bool
+}
+
+func Discover(ctx context.Context, dir string, patterns []string, tags string, scope Scope, options Discovery) ([]Package, error) {
 	var contents sync.Map
 	cfg := &packages.Config{
 		ParseFile: func(fset *token.FileSet, path string, data []byte) (*ast.File, error) {
@@ -93,8 +97,16 @@ func Discover(ctx context.Context, dir string, patterns []string, tags string, s
 	slices.SortFunc(pkgs, func(a, b *packages.Package) int { return strings.Compare(a.PkgPath, b.PkgPath) })
 	var results []Package
 	for _, pkg := range pkgs {
+		cgoWithoutTypes := false
 		if len(pkg.Errors) != 0 {
-			return nil, fmt.Errorf("load %s: %s", pkg.PkgPath, pkg.Errors[0])
+			cgoWithoutTypes = slices.ContainsFunc(pkg.Errors, func(issue packages.Error) bool {
+				return issue.Kind == packages.TypeError && strings.Contains(issue.Msg, "could not import C (no metadata for C)")
+			})
+			if !cgoWithoutTypes || slices.ContainsFunc(pkg.Errors, func(issue packages.Error) bool {
+				return issue.Kind != packages.TypeError
+			}) {
+				return nil, fmt.Errorf("load %s: %s", pkg.PkgPath, pkg.Errors[0])
+			}
 		}
 		if len(pkg.GoFiles) == 0 {
 			if pkg.Dir != "" {
@@ -108,14 +120,19 @@ func Discover(ctx context.Context, dir string, patterns []string, tags string, s
 		if pkg.Module != nil && !pkg.Module.Main {
 			return nil, fmt.Errorf("package %s is outside the main module or workspace", pkg.PkgPath)
 		}
-		portable := (pkg.Module == nil || pkg.Module.GoVersion == "" || versionSupportsProbes(pkg.Module.GoVersion)) && runtimeNamesAvailable(pkg.Types.Scope())
+		portable := !options.SourceOnly && !cgoWithoutTypes && (pkg.Module == nil || pkg.Module.GoVersion == "" || versionSupportsProbes(pkg.Module.GoVersion)) && runtimeNamesAvailable(pkg.Types.Scope())
 		slices.SortFunc(pkg.Syntax, func(a, b *ast.File) int {
 			return strings.Compare(pkg.Fset.PositionFor(a.Pos(), false).Filename, pkg.Fset.PositionFor(b.Pos(), false).Filename)
 		})
+		typed := make(map[string]bool)
 		for _, syntax := range pkg.Syntax {
 			astFile := pkg.Fset.File(syntax.Pos())
 			path := astFile.Name()
-			if !slices.Contains(pkg.GoFiles, path) || ast.IsGenerated(syntax) {
+			if !slices.Contains(pkg.GoFiles, path) {
+				continue
+			}
+			typed[path] = true
+			if !options.IncludeGenerated && ast.IsGenerated(syntax) {
 				continue
 			}
 			snapshot, ok := contents.Load(path)
@@ -125,8 +142,8 @@ func Discover(ctx context.Context, dir string, patterns []string, tags string, s
 			data := snapshot.([]byte)
 			file := &File{Path: path, Data: data}
 			findSites(file, syntax, astFile, pkg, scope, portable)
-			if full {
-				discoverSourceEdits(file, syntax, astFile, pkg, scope)
+			if options.Full || options.SourceOnly {
+				discoverSourceEdits(file, syntax, astFile, pkg, scope, cgoWithoutTypes)
 			}
 			if len(file.Sites)+len(file.Edits) > 0 {
 				p.Files = append(p.Files, file)
@@ -136,6 +153,20 @@ func Discover(ctx context.Context, dir string, patterns []string, tags string, s
 			data, err := os.ReadFile(path)
 			if err != nil {
 				return nil, fmt.Errorf("read %s: %w", path, err)
+			}
+			if !typed[path] && (options.Full || options.SourceOnly) {
+				fset := token.NewFileSet()
+				syntax, err := parser.ParseFile(fset, path, data, parser.ParseComments|parser.SkipObjectResolution)
+				if err != nil {
+					return nil, fmt.Errorf("parse original source %s: %w", path, err)
+				}
+				if options.IncludeGenerated || !ast.IsGenerated(syntax) {
+					file := &File{Path: path, Data: data}
+					discoverSourceEdits(file, syntax, fset.File(syntax.Pos()), pkg, scope, true)
+					if len(file.Edits) > 0 {
+						p.Files = append(p.Files, file)
+					}
+				}
 			}
 			for bytes.Contains(data, []byte(p.Prefix)) {
 				p.Prefix += "X"
