@@ -3,6 +3,7 @@ package campaign
 import (
 	"bytes"
 	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/t-k/targeted-mutation-go/internal/target"
@@ -19,6 +20,10 @@ func TestUnusedRepairIsBoundToTheEditedFile(t *testing.T) {
 	if !bytes.Contains(repair, []byte(`import _ "fmt"`)) ||
 		!bytes.Contains(repair, []byte("{ _ = &x;}")) {
 		t.Fatalf("unexpected repair: %s", repair)
+	}
+	wrongImport := []compilerDiagnostic{{path: path, line: 2, column: 8, message: `"os" imported as f and not used`}}
+	if repairUnused(source, path, wrongImport) != nil {
+		t.Fatal("diagnostic targeted the wrong import")
 	}
 	diags[1].path = "/tmp/other/source-0.go"
 	if repairUnused(source, path, diags) != nil {
@@ -74,4 +79,23 @@ func BenchmarkSourceQueue(b *testing.B) {
 			runtime.KeepAlive(s.sources)
 		}
 	})
+}
+
+func TestRepairSelectCaseLocalAfterDeclaration(t *testing.T) {
+	const path = "/tmp/overlay/source-0.go"
+	data := []byte("package p\nfunc f(ch chan int) int { select { case <-ch: x := 42; return 0 } }\n")
+	column := strings.Index(strings.Split(string(data), "\n")[1], "x :=") + 1
+	repair := repairUnused(data, path, []compilerDiagnostic{{path: path, line: 2, column: column, message: "declared and not used: x"}})
+	if !strings.Contains(string(repair), "x := 42; _ = &x; return 0") {
+		t.Fatalf("declaration was used before introduction: %s", repair)
+	}
+}
+
+func TestCompilerDiagnosticsSurviveLargeOutput(t *testing.T) {
+	var output commandOutput
+	_, _ = output.Write([]byte(`{"Action":"build-output","Output":"./tmp/source-0.go:4:6: missing return\n"}` + "\n"))
+	_, _ = output.Write([]byte(strings.Repeat("irrelevant output\n", 5000)))
+	if len(output.diagnostics) != 1 || output.diagnostics[0].message != "missing return" {
+		t.Fatalf("missing diagnostic: %+v", output.diagnostics)
+	}
 }

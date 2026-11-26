@@ -48,8 +48,8 @@ func (s *session) runSource(ctx context.Context, job sourceJob, baseline command
 	result.runs = 1
 	var diagnostics []compilerDiagnostic
 	if run.kind == "build-error" && job.edit != nil {
-		diagnostics = compilerDiagnostics(run.detail)
 		overlayFile := filepath.Join(dir, "source-0.go")
+		diagnostics = candidateDiagnostics(run, s.cfg.Dir, overlayFile)
 		if repaired := repairUnused(file.Data, overlayFile, diagnostics); repaired != nil {
 			if err := os.WriteFile(overlayFile, repaired, 0600); err != nil {
 				result.err = err
@@ -57,7 +57,7 @@ func (s *session) runSource(ctx context.Context, job sourceJob, baseline command
 			}
 			run = serial.goTest(ctx, overlay, s.cfg.Patterns...)
 			result.runs++
-			diagnostics = compilerDiagnostics(run.detail)
+			diagnostics = candidateDiagnostics(run, s.cfg.Dir, overlayFile)
 		}
 	}
 	f := &result.finding

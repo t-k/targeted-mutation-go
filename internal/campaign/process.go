@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"time"
 )
@@ -20,13 +21,15 @@ type goEnvironment struct {
 }
 
 type commandResult struct {
-	kind      string
-	detail    string
-	failed    []string
-	tests     []string
-	events    []string
-	inventory map[string][]string
-	packages  map[string]string
+	kind            string
+	detail          string
+	failed          []string
+	tests           []string
+	events          []string
+	inventory       map[string][]string
+	packages        map[string]string
+	diagnostics     []compilerDiagnostic
+	moreDiagnostics bool
 }
 
 func environment(ctx context.Context, dir string) (goEnvironment, error) {
@@ -117,7 +120,8 @@ func runCommand(ctx context.Context, limit time.Duration, dir string, env []stri
 	configureProcess(cmd)
 	err := cmd.Run()
 	output.finish()
-	result := commandResult{detail: strings.TrimSpace(output.tail.String()), failed: output.failed, tests: output.tests, events: output.events, inventory: output.inventory, packages: output.packages}
+	result := commandResult{detail: strings.TrimSpace(output.tail.String()), failed: output.failed, tests: output.tests, events: output.events, inventory: output.inventory, packages: output.packages,
+		diagnostics: output.diagnostics, moreDiagnostics: output.moreDiagnostics}
 	switch {
 	case ctx.Err() == context.DeadlineExceeded:
 		result.kind = "timeout"
@@ -144,17 +148,19 @@ func runCommand(ctx context.Context, limit time.Duration, dir string, env []stri
 }
 
 type commandOutput struct {
-	tail        bytes.Buffer
-	line        []byte
-	discardLine bool
-	failed      []string
-	tests       []string
-	events      []string
-	direct      bool
-	inventory   map[string][]string
-	packages    map[string]string
-	buildFailed bool
-	timedOut    bool
+	tail            bytes.Buffer
+	line            []byte
+	discardLine     bool
+	failed          []string
+	tests           []string
+	events          []string
+	direct          bool
+	inventory       map[string][]string
+	packages        map[string]string
+	buildFailed     bool
+	timedOut        bool
+	diagnostics     []compilerDiagnostic
+	moreDiagnostics bool
 }
 
 func (o *commandOutput) Write(data []byte) (int, error) {
@@ -188,6 +194,7 @@ func (o *commandOutput) add(data []byte) {
 	} else {
 		o.discardLine = true
 		o.line = o.line[:0]
+		o.moreDiagnostics = true
 	}
 }
 
@@ -210,6 +217,18 @@ func (o *commandOutput) finish() {
 	}
 	if json.Unmarshal([]byte(line), &event) != nil {
 		return
+	}
+	if event.Action == "build-output" {
+		for _, diagnostic := range parseCompilerOutput(event.Output) {
+			if slices.Contains(o.diagnostics, diagnostic) {
+				continue
+			}
+			if len(o.diagnostics) == 128 {
+				o.moreDiagnostics = true
+				break
+			}
+			o.diagnostics = append(o.diagnostics, diagnostic)
+		}
 	}
 	if event.FailedBuild != "" || event.Action == "build-fail" {
 		o.buildFailed = true

@@ -251,6 +251,11 @@ func TestProfileFlagsAndEmptyScopeBaseline(t *testing.T) {
 
 func TestFullRunsSourceMutationAfterRepairingUnusedDeclarations(t *testing.T) {
 	dir := t.TempDir()
+	scratch := filepath.Join(dir, ".tmp")
+	if err := os.Mkdir(scratch, 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("TMPDIR", scratch)
 	fixture(t, dir, "go.mod", "module example.org/repair\n\ngo 1.26.0\n")
 	fixture(t, dir, "value.go", `package repair
 import "strings"

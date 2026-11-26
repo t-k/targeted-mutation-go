@@ -2,7 +2,6 @@ package campaign
 
 import (
 	"bytes"
-	"encoding/json"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -20,25 +19,32 @@ type compilerDiagnostic struct {
 
 var diagnosticPattern = regexp.MustCompile(`^(.+?):(\d+):(\d+): (.+)$`)
 
-func compilerDiagnostics(output string) []compilerDiagnostic {
+func parseCompilerOutput(output string) []compilerDiagnostic {
 	var diagnostics []compilerDiagnostic
-	seen := make(map[compilerDiagnostic]bool)
-	for line := range strings.SplitSeq(output, "\n") {
-		var event struct{ Action, Output string }
-		if json.Unmarshal([]byte(line), &event) != nil || event.Action != "build-output" {
-			continue
+	for text := range strings.SplitSeq(output, "\n") {
+		if m := diagnosticPattern.FindStringSubmatch(text); m != nil {
+			line, _ := strconv.Atoi(m[2])
+			column, _ := strconv.Atoi(m[3])
+			diagnostics = append(diagnostics, compilerDiagnostic{path: m[1], line: line, column: column, message: m[4]})
 		}
-		for text := range strings.SplitSeq(event.Output, "\n") {
-			if m := diagnosticPattern.FindStringSubmatch(text); m != nil {
-				line, _ := strconv.Atoi(m[2])
-				column, _ := strconv.Atoi(m[3])
-				d := compilerDiagnostic{path: m[1], line: line, column: column, message: m[4]}
-				if !seen[d] {
-					diagnostics = append(diagnostics, d)
-					seen[d] = true
-				}
-			}
+	}
+	return diagnostics
+}
+
+func candidateDiagnostics(run commandResult, workingDir, overlayFile string) []compilerDiagnostic {
+	if run.moreDiagnostics {
+		return nil
+	}
+	diagnostics := slices.Clone(run.diagnostics)
+	for i := range diagnostics {
+		d := &diagnostics[i]
+		if !filepath.IsAbs(d.path) {
+			d.path = filepath.Join(workingDir, d.path)
 		}
+		if filepath.Clean(d.path) != overlayFile {
+			return nil
+		}
+		d.path = overlayFile
 	}
 	return diagnostics
 }
@@ -103,10 +109,23 @@ func findUnused(file *ast.File, positions *token.File, diag compilerDiagnostic) 
 		if !matches(imported.Pos()) && !matches(imported.Path.Pos()) {
 			continue
 		}
+		path, err := strconv.Unquote(imported.Path.Value)
+		if err != nil {
+			return sourcePatch{}, false
+		}
+		prefix := strconv.Quote(path) + " imported"
+		expected := prefix + " and not used"
 		if imported.Name != nil {
+			aliasMessage := prefix + " as " + imported.Name.Name + " and not used"
+			if diag.message != expected && diag.message != aliasMessage {
+				return sourcePatch{}, false
+			}
 			return sourcePatch{imported.Name.Pos(), imported.Name.End(), "_"}, true
 		}
-		return sourcePatch{imported.Path.Pos(), imported.Path.Pos(), "_ "}, true
+		if diag.message == expected {
+			return sourcePatch{imported.Path.Pos(), imported.Path.Pos(), "_ "}, true
+		}
+		return sourcePatch{}, false
 	}
 	return sourcePatch{}, false
 }
@@ -135,7 +154,10 @@ func consumeLocal(id *ast.Ident, stack []ast.Node) (sourcePatch, bool) {
 		case *ast.TypeSwitchStmt:
 			return useInSwitch(enclosing.Body, use)
 		case *ast.CommClause:
-			return insert(enclosing.Colon+1, " "+use+";")
+			if enclosing.Comm == n {
+				return insert(enclosing.Colon+1, " "+use+";")
+			}
+			return insert(n.End(), "; "+use)
 		default:
 			return insert(n.End(), "; "+use)
 		}
