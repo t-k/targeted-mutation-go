@@ -29,7 +29,12 @@ type sourceResult struct {
 
 func (s *session) runSourceComparison(ctx context.Context, job sourceJob, reached []*consumer, baseline commandResult) sourceResult {
 	if len(reached) == 0 {
-		return sourceResult{jobResult: s.runSource(ctx, job, baseline)}
+		res := sourceResult{jobResult: s.runSource(ctx, job, baseline)}
+		if res.finding.Status == "timeout" && res.deadlineExceeded && s.cfg.Jobs == 1 && s.cfg.TimeoutRecheck != "none" {
+			res.finding.Status, res.finding.Detail = "killed", "killed by timeout"
+			res.timedOutKilled = true
+		}
+		return res
 	}
 	site := job.edit.Site
 	candidate := analysis.Candidate{Op: job.edit.Operator, Pivot: job.edit.Pivot, Shift: job.edit.Shift, Float: site.Float}
@@ -71,9 +76,17 @@ func (s *session) runSourceComparison(ctx context.Context, job sourceJob, reache
 			return result
 		}
 		result.jobResult = s.runSource(ctx, job, baseline)
+		if result.finding.Status == "timeout" && result.deadlineExceeded && s.cfg.Jobs == 1 && s.cfg.TimeoutRecheck != "none" {
+			result.finding.Status, result.finding.Detail = "killed", "killed by timeout"
+			result.timedOutKilled = true
+		}
 	default:
 		// An unconfirmed probe verdict must be resolved using the actual edit.
 		result.jobResult = s.runSource(ctx, job, baseline)
+		if result.finding.Status == "timeout" && result.deadlineExceeded && s.cfg.Jobs == 1 && s.cfg.TimeoutRecheck != "none" {
+			result.finding.Status, result.finding.Detail = "killed", "killed by timeout"
+			result.timedOutKilled = true
+		}
 	}
 	return result
 }
@@ -140,7 +153,7 @@ func (s *session) runSource(ctx context.Context, job sourceJob, baseline command
 			return result
 		}
 	}
-	run := serial.goTest(ctx, overlay, s.testPatterns()...)
+	run := serial.goTestMutant(ctx, overlay, s.testPatterns()...)
 	result.runs++
 	var diagnostics []compilerDiagnostic
 	if run.kind == "build-error" && job.edit != nil {
@@ -150,7 +163,7 @@ func (s *session) runSource(ctx context.Context, job sourceJob, baseline command
 				result.err = err
 				return result
 			}
-			run = serial.goTest(ctx, overlay, s.testPatterns()...)
+			run = serial.goTestMutant(ctx, overlay, s.testPatterns()...)
 			result.runs++
 			diagnostics = candidateDiagnostics(run, s.cfg.Dir, overlayFile)
 		}
@@ -172,6 +185,9 @@ func (s *session) runSource(ctx context.Context, job sourceJob, baseline command
 		f.Status, f.Detail = "non-viable", diagnostics[0].message
 	default:
 		f.Status, f.Detail = run.kind, run.detail
+		if run.kind == "timeout" && run.testTimedOut && run.elapsed+s.cfg.Timeout/10 >= s.cfg.Timeout {
+			result.deadlineExceeded = true
+		}
 	}
 	return result
 }
@@ -182,5 +198,5 @@ func (s *session) compilePackageOverlay(ctx context.Context, dir, overlay, pkgPa
 	args := []string{"test", "-json", "-c", "-o", outBin, "-p=1", "-vet=off", "-overlay=" + overlay}
 	args = append(args, s.buildFlags()...)
 	args = append(args, pkgPath)
-	return runCommand(ctx, s.cfg.BuildTimeout, s.cfg.Dir, cleanEnv(), "go", args...)
+	return runCommand(ctx, s.cfg.BuildTimeout, s.cfg.Dir, s.workerEnv(), "go", args...)
 }

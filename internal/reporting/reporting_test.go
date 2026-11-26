@@ -199,10 +199,17 @@ func TestReportingPICT(t *testing.T) {
 }
 
 func TestWriteJSONLPreservesOrderAndEmptyRuns(t *testing.T) {
-	for _, findings := range [][]campaign.Finding{nil, {{Expression: "first"}, {Expression: "second"}}} {
+	for _, findings := range [][]campaign.Finding{nil, {{Expression: "x < 1"}, {Expression: "second"}}} {
 		var out bytes.Buffer
 		if err := WriteJSONL(&out, campaign.Report{Schema: 1, Findings: findings}, expressionID); err != nil {
 			t.Fatal(err)
+		}
+		rawOut := out.String()
+		if len(findings) > 0 && (!strings.Contains(rawOut, `"x < 1"`) || strings.Contains(rawOut, `\u003c`)) {
+			t.Fatalf("WriteJSONL escaped HTML characters: %s", rawOut)
+		}
+		if !strings.Contains(rawOut, `"schema":1`) || !strings.Contains(rawOut, `"report":`) {
+			t.Fatalf("WriteJSONL missing exact lowercase schema/report keys: %s", rawOut)
 		}
 		decoder := json.NewDecoder(&out)
 		var metadata map[string]any
@@ -330,18 +337,85 @@ func TestWriteSARIFResolvesSiblingWorkspaceDirs(t *testing.T) {
 			t.Fatalf("expected physical symlink escape outside repo/WorkspaceDirs to omit SARIF location: %+v", escapeSarif.Runs[0].Results[0].Locations)
 		}
 	}
+
+	// Verify exact UTF-16 BMP boundary (U+FFFF = 1 unit vs U+10000 = 2 units) and Line/Column bounds.
+	bmpFile := filepath.Join(workspaceDir, "bmp.go")
+	bmpContent := "package w\nvar s = \"\uFFFF\U00010000x\"\n"
+	if err := os.WriteFile(bmpFile, []byte(bmpContent), 0600); err != nil {
+		t.Fatal(err)
+	}
+	line2 := strings.Split(bmpContent, "\n")[1]
+	colAfterBMP := strings.Index(line2, "\U00010000") + 1
+	colAfterSupp := strings.Index(line2, "x") + 1
+	colEOL := len(line2) + 1
+	boundPaths := SARIFPaths{ProjectDir: workspaceDir, RepositoryDir: workspaceDir, WorkspaceDirs: []string{workspaceDir}}
+	boundRun := campaign.Report{
+		Schema: 1,
+		Sites:  6,
+		Findings: []campaign.Finding{
+			{Status: "input-gap", File: "bmp.go", Line: 2, Column: colAfterBMP, Expression: "a"},
+			{Status: "input-gap", File: "bmp.go", Line: 2, Column: colAfterSupp, Expression: "b"},
+			{Status: "input-gap", File: "bmp.go", Line: 2, Column: colEOL, Expression: "c"},
+			{Status: "input-gap", File: "bmp.go", Line: 2, Column: colEOL + 1, Expression: "d"},
+			{Status: "input-gap", File: "bmp.go", Line: 0, Column: 1, Expression: "e"},
+			{Status: "input-gap", File: "bmp.go", Line: 2, Column: 0, Expression: "f"},
+			{Status: "input-gap", File: "bmp.go", Line: 4, Column: 1, Expression: "g"},
+		},
+	}
+	out.Reset()
+	if err := WriteSARIF(&out, boundRun, expressionID, boundPaths); err != nil {
+		t.Fatal(err)
+	}
+	var boundSarif struct {
+		Runs []struct {
+			Results []struct {
+				Locations []struct {
+					PhysicalLocation struct {
+						Region *struct{ StartLine, StartColumn int }
+					}
+				}
+			}
+		}
+	}
+	decode(t, out.Bytes(), &boundSarif)
+	gotRegions := boundSarif.Runs[0].Results
+	// `var s = "` is 9 ASCII chars (cols 1..9 -> StartColumn 10 at \uFFFF). After \uFFFF (1 unit) -> 11; after \U00010000 (2 units) -> 13!
+	if gotRegions[0].Locations[0].PhysicalLocation.Region.StartColumn != 11 {
+		t.Fatalf("after U+FFFF expected StartColumn 11, got %+v", gotRegions[0].Locations[0].PhysicalLocation.Region)
+	}
+	if gotRegions[1].Locations[0].PhysicalLocation.Region.StartColumn != 13 {
+		t.Fatalf("after U+10000 expected StartColumn 13, got %+v", gotRegions[1].Locations[0].PhysicalLocation.Region)
+	}
+	if gotRegions[2].Locations[0].PhysicalLocation.Region.StartColumn != 15 {
+		t.Fatalf("at len(line)+1 expected StartColumn 15, got %+v", gotRegions[2].Locations[0].PhysicalLocation.Region)
+	}
+	if gotRegions[3].Locations[0].PhysicalLocation.Region.StartColumn != 0 {
+		t.Fatalf("at len(line)+2 expected StartColumn 0, got %+v", gotRegions[3].Locations[0].PhysicalLocation.Region)
+	}
+	if gotRegions[4].Locations[0].PhysicalLocation.Region != nil {
+		t.Fatalf("Line 0 must omit Region, got %+v", gotRegions[4].Locations[0].PhysicalLocation.Region)
+	}
+	if gotRegions[5].Locations[0].PhysicalLocation.Region.StartColumn != 0 {
+		t.Fatalf("Column 0 must omit StartColumn, got %+v", gotRegions[5].Locations[0].PhysicalLocation.Region)
+	}
+	if gotRegions[6].Locations[0].PhysicalLocation.Region.StartColumn != 0 {
+		t.Fatalf("Line > len(lines) must omit StartColumn, got %+v", gotRegions[6].Locations[0].PhysicalLocation.Region)
+	}
 }
 
 func TestBaselineSnapshotRoundTrip(t *testing.T) {
 	file := filepath.Join(t.TempDir(), "baseline.json")
-	findings := []campaign.Finding{{Status: "input-gap", Expression: "z", Line: 1}, {Status: "assertion-gap", Expression: "a"},
-		{Status: "source-survivor", Expression: "a"}, {Status: "killed", Expression: "k"}, {Status: "timeout", Expression: "e"}}
+	findings := []campaign.Finding{{Status: "killed", Expression: "k"}, {Status: "input-gap", Expression: "z", Line: 1},
+		{Status: "timeout", Expression: "e"}, {Status: "assertion-gap", Expression: "a"}, {Status: "source-survivor", Expression: "a"}}
 	if err := WriteBaseline(file, campaign.Report{Findings: findings}, expressionID); err != nil {
 		t.Fatal(err)
 	}
 	raw, err := os.ReadFile(file)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), `"schema": 1`) || !strings.Contains(string(raw), `"ids":`) {
+		t.Fatalf("baseline missing exact lowercase schema/ids keys: %s", raw)
 	}
 	var doc struct {
 		Schema int
@@ -355,7 +429,7 @@ func TestBaselineSnapshotRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	moved := findings[0]
+	moved := findings[1]
 	moved.Line = 42
 	if !known.Suppresses(moved, expressionID) {
 		t.Errorf("known finding at new location was not suppressed")
@@ -370,8 +444,8 @@ func TestBaselineSnapshotRoundTrip(t *testing.T) {
 }
 
 func TestReadBaselineRejectsInvalidSnapshots(t *testing.T) {
-	cases := []string{"", `null`, `{}`, `{"schema":2,"ids":[]}`, `{"schema":1}`, `{"schema":1,"ids":null}`,
-		`{"schema":1,"ids":[" "]}`, `{"schema":1,"ids":[2]}`, `{"schema":1,"ids":[]} {}`}
+	cases := []string{"", `null`, `{}`, `{"schema":0,"ids":[]}`, `{"schema":2,"ids":[]}`, `{"schema":1}`, `{"schema":1,"ids":null}`,
+		`{"schema":1,"ids":[""]}`, `{"schema":1,"ids":[" "]}`, `{"schema":1,"ids":[2]}`, `{"schema":1,"ids":[]} {}`}
 	file := filepath.Join(t.TempDir(), "baseline.json")
 	for _, input := range cases {
 		if err := os.WriteFile(file, []byte(input), 0600); err != nil {
@@ -380,6 +454,12 @@ func TestReadBaselineRejectsInvalidSnapshots(t *testing.T) {
 		if _, err := ReadBaseline(file); err == nil {
 			t.Errorf("accepted malformed baseline %q", input)
 		}
+	}
+	if _, err := ReadBaseline(filepath.Join(t.TempDir(), "missing.json")); err == nil {
+		t.Error("expected missing baseline file to fail")
+	}
+	if err := WriteBaseline(file, campaign.Report{Findings: []campaign.Finding{{Status: "input-gap", Expression: ""}}}, expressionID); err == nil {
+		t.Error("expected WriteBaseline with empty stable ID to fail")
 	}
 }
 

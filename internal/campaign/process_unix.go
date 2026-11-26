@@ -10,11 +10,18 @@ import (
 	"time"
 )
 
+var killProcessGroup = func(pid int, sig syscall.Signal) error {
+	return syscall.Kill(-pid, sig)
+}
+
 func configureProcess(cmd *exec.Cmd) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.WaitDelay = 2 * time.Second
 	cmd.Cancel = func() error {
-		err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		if cmd.Process == nil || cmd.Process.Pid <= 1 {
+			return os.ErrProcessDone
+		}
+		err := killProcessGroup(cmd.Process.Pid, syscall.SIGKILL)
 		if errors.Is(err, syscall.ESRCH) {
 			return os.ErrProcessDone
 		}
@@ -23,13 +30,13 @@ func configureProcess(cmd *exec.Cmd) {
 }
 
 func cleanupProcess(cmd *exec.Cmd) {
-	if cmd.Process == nil || cmd.Process.Pid <= 0 {
+	if cmd == nil || cmd.Process == nil || cmd.Process.Pid <= 1 {
 		return
 	}
 	pid := cmd.Process.Pid
-	_ = syscall.Kill(-pid, syscall.SIGKILL)
+	_ = killProcessGroup(pid, syscall.SIGKILL)
 	for range 25 {
-		if errors.Is(syscall.Kill(-pid, 0), syscall.ESRCH) {
+		if errors.Is(killProcessGroup(pid, 0), syscall.ESRCH) {
 			return
 		}
 		time.Sleep(2 * time.Millisecond)

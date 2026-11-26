@@ -317,7 +317,7 @@ type Candidate struct {
 
 func (c Candidate) Infects(original Operator, seen Summary) bool {
 	if c.Kind == "margin" {
-		if c.Shift < 0 {
+		if c.Shift < 0 { // tmt:ignore: margin Shift is only ever -1 or +1
 			return seen.Flags&Less != 0 && seen.BelowGap == 1
 		}
 		return seen.Flags&Greater != 0 && seen.AboveGap == 1
@@ -332,10 +332,13 @@ func (c Candidate) Infects(original Operator, seen Summary) bool {
 	if checksNeighbor && seen.Flags&Equal != 0 {
 		return true
 	}
-	if !checksNeighbor && c.Op == original && (original == GE || original == LT) == (c.Shift > 0) {
-		return seen.Flags&Equal != 0
+	if !checksNeighbor && c.Op == original {
+		positiveShift := c.Shift > 0 // tmt:ignore: non-zero threshold Shift is -1 or +1
+		if (original == GE || original == LT) == positiveShift {
+			return seen.Flags&Equal != 0
+		}
 	}
-	if c.Shift < 0 {
+	if c.Shift < 0 { // tmt:ignore: non-zero threshold Shift is -1 or +1
 		return seen.Flags&Less != 0 && seen.Below >= c.Pivot
 	}
 	return seen.Flags&Greater != 0 && seen.Above <= c.Pivot
@@ -396,7 +399,7 @@ func planSite(op Operator, domain *Domain, margin, isFloat bool, seen Summary, t
 				if !candidate.Infects(op, seen) {
 					candidates = append(candidates, candidate)
 				}
-			} else if op == GT || op == LE {
+			} else {
 				candidate := Candidate{Kind: "margin", Op: op, Shift: 1}
 				if !candidate.Infects(op, seen) {
 					candidates = append(candidates, candidate)
@@ -448,7 +451,7 @@ func planSite(op Operator, domain *Domain, margin, isFloat bool, seen Summary, t
 	return candidates
 }
 
-// ThresholdInterval returns the inclusive set of thresholds consistent with the observed decisions.
+// ThresholdInterval returns the inclusive set of reachable thresholds consistent with the observed decisions.
 func ThresholdInterval(op Operator, d Domain, seen Summary) (low, high uint64, ok bool) {
 	if op.Boundary() == 0 {
 		return 0, 0, false
@@ -471,6 +474,14 @@ func ThresholdInterval(op Operator, d Domain, seen Summary) (low, high uint64, o
 		}
 		if seen.Flags&Greater != 0 {
 			high = seen.Above - 1
+		}
+	}
+	if d.Attainable != nil {
+		var lowOK, highOK bool
+		low, lowOK = d.NextPossible(low)
+		high, highOK = d.PrevPossible(high)
+		if !lowOK || !highOK || low > high {
+			return 0, 0, false
 		}
 	}
 	return low, high, true

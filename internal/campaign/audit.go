@@ -51,6 +51,9 @@ func (s *session) auditProbes(ctx context.Context, report *Report, probes []prob
 		report.SourceRuns += result.runs
 		report.Audited++
 		got := result.finding.Status
+		if got == "timeout" && result.deadlineExceeded && s.cfg.TimeoutRecheck == "serial" {
+			got = "killed"
+		}
 		if auditVerdict(f.Status) == auditVerdict(got) {
 			continue
 		}

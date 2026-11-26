@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -33,7 +34,10 @@ type commandResult struct {
 	moreDiagnostics bool
 	failedBuilds     map[string]bool
 	elapsed          time.Duration
+	maxTestElapsed   time.Duration
+	hasTestElapsed   bool
 	deadlineExceeded bool
+	testTimedOut     bool
 }
 
 func environment(ctx context.Context, dir string) (goEnvironment, error) {
@@ -94,7 +98,7 @@ func checkGoFlags(raw string) error {
 
 func cleanEnv(overrides ...string) []string {
 	env := os.Environ()
-	remove := map[string]bool{"TMT_GO_TRACE": true, "TMT_GO_MUTATION": true}
+	remove := map[string]bool{"TMT_GO_TRACE": true, "TMT_GO_MUTATION": true, sourceWitnessEnvironment: true}
 	for _, value := range overrides {
 		key, _, _ := strings.Cut(value, "=")
 		remove[key] = true
@@ -107,6 +111,18 @@ func cleanEnv(overrides ...string) []string {
 		}
 	}
 	return append(values, overrides...)
+}
+
+func (s *session) workerEnv(overrides ...string) []string {
+	if s.workerProcs > 0 {
+		overrides = append([]string{"GOMAXPROCS=" + strconv.Itoa(s.workerProcs)}, overrides...)
+	}
+	return cleanEnv(overrides...)
+}
+
+func (s *session) binaryWorkerEnv(trace, mutation string) []string {
+	return s.workerEnv("PATH="+filepath.Join(s.env.GOROOT, "bin")+string(os.PathListSeparator)+os.Getenv("PATH"),
+		"TMT_GO_TRACE="+trace, "TMT_GO_MUTATION="+mutation)
 }
 
 func binaryEnv(env goEnvironment, trace, mutation string) []string {
@@ -132,8 +148,9 @@ func runCommand(ctx context.Context, limit time.Duration, dir string, env []stri
 	}
 	output.finish()
 	deadlineExceeded := ctx.Err() == context.DeadlineExceeded
+	testTimedOut := output.timedOut && !output.buildFailed
 	result := commandResult{detail: strings.TrimSpace(output.tail.String()), failed: output.failed, tests: output.tests, events: output.events, inventory: output.inventory, packages: output.packages,
-		diagnostics: output.diagnostics, moreDiagnostics: output.moreDiagnostics, failedBuilds: output.failedBuilds, elapsed: elapsed, deadlineExceeded: deadlineExceeded}
+		diagnostics: output.diagnostics, moreDiagnostics: output.moreDiagnostics, failedBuilds: output.failedBuilds, elapsed: elapsed, maxTestElapsed: output.maxTestElapsed, hasTestElapsed: output.hasTestElapsed, deadlineExceeded: deadlineExceeded, testTimedOut: testTimedOut}
 	switch {
 	case deadlineExceeded:
 		result.kind = "timeout"
@@ -174,6 +191,8 @@ type commandOutput struct {
 	diagnostics     []compilerDiagnostic
 	moreDiagnostics bool
 	failedBuilds    map[string]bool
+	maxTestElapsed  time.Duration
+	hasTestElapsed  bool
 }
 
 func (o *commandOutput) Write(data []byte) (int, error) {
@@ -227,6 +246,7 @@ func (o *commandOutput) finish() {
 	}
 	var event struct {
 		Action, Test, Package, ImportPath, FailedBuild, Output string
+		Elapsed                                                *float64
 	}
 	if json.Unmarshal([]byte(line), &event) != nil {
 		return
@@ -259,6 +279,12 @@ func (o *commandOutput) finish() {
 			o.packages = make(map[string]string)
 		}
 		o.packages[event.Package] = event.Action
+		if event.Action == "pass" && event.Elapsed != nil && *event.Elapsed >= 0 {
+			o.hasTestElapsed = true
+			if d := time.Duration(*event.Elapsed * float64(time.Second)); d > o.maxTestElapsed {
+				o.maxTestElapsed = d
+			}
+		}
 	}
 	if event.Test != "" {
 		switch event.Action {
@@ -272,7 +298,7 @@ func (o *commandOutput) finish() {
 			}
 		}
 	}
-	if strings.HasPrefix(event.Output, "panic: test timed out") {
+	if strings.HasPrefix(event.Output, "panic: test timed out after ") {
 		o.timedOut = true
 	}
 }

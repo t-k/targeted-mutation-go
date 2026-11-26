@@ -223,6 +223,40 @@ func TestRankAndMergedExtremes(t *testing.T) {
 	if s1.Below != 9 || s1.BelowGap != 1 || s1.Above != 11 || s1.AboveGap != 1 {
 		t.Fatalf("unexpected merged gaps: %+v", s1)
 	}
+
+	// Verify Observe keeps minimum non-zero gap regardless of observation order, including equal repeats.
+	var decBelow Summary
+	decBelow.Observe(9, 10) // gap 1
+	decBelow.Observe(5, 10) // gap 5 must NOT overwrite Below=9 or BelowGap=1
+	decBelow.Observe(9, 10) // equal Below=9, gap=1
+	if decBelow.Below != 9 || decBelow.BelowGap != 1 {
+		t.Fatalf("Observe overwrote tight below gap: %+v", decBelow)
+	}
+	var decAbove Summary
+	decAbove.Observe(11, 10) // gap 1
+	decAbove.Observe(18, 10) // gap 8 must NOT overwrite Above=11 or AboveGap=1
+	decAbove.Observe(11, 10) // equal Above=11, gap=1
+	if decAbove.Above != 11 || decAbove.AboveGap != 1 {
+		t.Fatalf("Observe overwrote tight above gap: %+v", decAbove)
+	}
+
+	// Verify Merge from empty receiver, non-empty receiver with smaller gap, and zero-gap legacy Summary.
+	var intoEmpty Summary
+	intoEmpty.Merge(decBelow)
+	intoEmpty.Merge(decAbove)
+	if intoEmpty.Below != 9 || intoEmpty.BelowGap != 1 || intoEmpty.Above != 11 || intoEmpty.AboveGap != 1 {
+		t.Fatalf("Merge into empty Summary failed: %+v", intoEmpty)
+	}
+	wider := Summary{Flags: Less | Greater, Below: 5, BelowGap: 5, Above: 15, AboveGap: 5}
+	intoEmpty.Merge(wider)
+	if intoEmpty.Below != 9 || intoEmpty.BelowGap != 1 || intoEmpty.Above != 11 || intoEmpty.AboveGap != 1 {
+		t.Fatalf("Merge overwrote tighter gaps with wider gaps: %+v", intoEmpty)
+	}
+	zeroGap := Summary{Flags: Less | Greater, Below: 8, BelowGap: 0, Above: 12, AboveGap: 0}
+	zeroGap.Merge(wider)
+	if zeroGap.Below != 8 || zeroGap.BelowGap != 5 || zeroGap.Above != 12 || zeroGap.AboveGap != 5 {
+		t.Fatalf("Merge into zero-gap Summary failed: %+v", zeroGap)
+	}
 }
 
 func TestPrevAndNextPossibleExhaustive8Bit(t *testing.T) {
@@ -313,6 +347,71 @@ func TestPrevAndNextPossible64BitEdgeCases(t *testing.T) {
 	}
 	if got, ok := s.NextPossible(RankSigned(1<<63 - 1)); ok {
 		t.Fatalf("expected no next possible above MaxInt64 with bit 0 forbidden, got %#x", got)
+	}
+
+	// ExactRanks of length 1, domain boundary checks, and signed signBit boundary checks.
+	single := Domain{Low: 2, High: 10, Attainable: &Attainable{Low: 5, High: 5, ExactRanks: []uint64{5}}}
+	if single.Possible(1) || single.Possible(4) || !single.Possible(5) || single.Possible(6) || single.Possible(11) {
+		t.Fatalf("unexpected single ExactRanks Possible")
+	}
+	if v, ok := single.PrevPossible(4); ok || v != 0 {
+		t.Fatalf("PrevPossible(4) = (%d, %v), want (0, false)", v, ok)
+	}
+	if v, ok := single.PrevPossible(5); !ok || v != 5 {
+		t.Fatalf("PrevPossible(5) = (%d, %v), want (5, true)", v, ok)
+	}
+	if v, ok := single.PrevPossible(9); !ok || v != 5 {
+		t.Fatalf("PrevPossible(9) = (%d, %v), want (5, true)", v, ok)
+	}
+	if v, ok := single.NextPossible(3); !ok || v != 5 {
+		t.Fatalf("NextPossible(3) = (%d, %v), want (5, true)", v, ok)
+	}
+	if v, ok := single.NextPossible(5); !ok || v != 5 {
+		t.Fatalf("NextPossible(5) = (%d, %v), want (5, true)", v, ok)
+	}
+	if v, ok := single.NextPossible(6); ok || v != 0 {
+		t.Fatalf("NextPossible(6) = (%d, %v), want (0, false)", v, ok)
+	}
+
+	// Empty inverted domain (Attainable.Low > High) must reject PrevPossible and NextPossible, while lo == hi succeeds.
+	emptyDom := Domain{Low: 5, High: 5, Attainable: &Attainable{Low: 6, High: 5}}
+	if _, ok := emptyDom.PrevPossible(5); ok {
+		t.Fatal("inverted domain should fail PrevPossible")
+	}
+	if _, ok := emptyDom.NextPossible(5); ok {
+		t.Fatal("inverted domain should fail NextPossible")
+	}
+	pointDom := Domain{Low: 5, High: 5, Attainable: &Attainable{Low: 5, High: 5}}
+	if !pointDom.Possible(5) || pointDom.Possible(4) || pointDom.Possible(6) {
+		t.Fatal("point domain Possible boundary failed")
+	}
+	if v, ok := pointDom.PrevPossible(5); !ok || v != 5 {
+		t.Fatalf("point domain PrevPossible(5) = (%d, %v)", v, ok)
+	}
+
+	// Signed boundary right at 0 (signBit) and -1 (signBit - 1).
+	nonNegEven := Domain{
+		Low: RankSigned(-128), High: RankSigned(127), WidthMask: 0xff, Signed: true,
+		Attainable: &Attainable{Low: RankSigned(0), High: RankSigned(126), ZeroBits: 1},
+	}
+	if _, ok := nonNegEven.PrevPossible(RankSigned(0) - 1); ok {
+		t.Fatal("nonNegEven PrevPossible(-1) should be false")
+	}
+	if v, ok := nonNegEven.PrevPossible(RankSigned(0)); !ok || v != RankSigned(0) {
+		t.Fatalf("nonNegEven PrevPossible(0) = (%#x, %v)", v, ok)
+	}
+	if v, ok := nonNegEven.NextPossible(RankSigned(0)); !ok || v != RankSigned(0) {
+		t.Fatalf("nonNegEven NextPossible(0) = (%#x, %v)", v, ok)
+	}
+	negOnlyEven := Domain{
+		Low: RankSigned(-128), High: RankSigned(127), WidthMask: 0xff, Signed: true,
+		Attainable: &Attainable{Low: RankSigned(-128), High: RankSigned(-2), ZeroBits: 1},
+	}
+	if v, ok := negOnlyEven.NextPossible(RankSigned(-2)); !ok || v != RankSigned(-2) {
+		t.Fatalf("negOnlyEven NextPossible(-2) = (%#x, %v)", v, ok)
+	}
+	if _, ok := negOnlyEven.NextPossible(RankSigned(-1)); ok {
+		t.Fatal("negOnlyEven NextPossible(-1) should be false")
 	}
 }
 
@@ -414,6 +513,26 @@ func TestPlanSiteFloatAndMargin(t *testing.T) {
 	aboveTight.Observe(11, 10)
 	if cands := PlanSite(LE, nil, true, false, aboveTight, true); len(cands) != 2 {
 		t.Fatalf("expected margin-up dropped when AboveGap=1: %+v", cands)
+	}
+	for _, tc := range []struct {
+		op    Operator
+		shift int
+	}{{GE, -1}, {LT, -1}, {GT, 1}, {LE, 1}} {
+		prev := PreviewSite(tc.op, nil, true, false, true)
+		if len(prev) != 3 || prev[2].Kind != "margin" || prev[2].Op != tc.op || prev[2].Shift != tc.shift {
+			t.Fatalf("PreviewSite(%v) margin = %+v, want shift %d", tc.op, prev, tc.shift)
+		}
+	}
+
+	// ThresholdInterval clamps to Attainable bounds (e.g. len(xs) > 0 observed > 0 yields 0..0, not MinInt64..0).
+	lenDom := Domain{
+		Low: RankSigned(-1 << 63), High: RankSigned(1<<63 - 1), Signed: true, Pivot: RankSigned(0),
+		Attainable: &Attainable{Low: RankSigned(0), High: RankSigned(1<<63 - 1)},
+	}
+	var seenPos Summary
+	seenPos.Observe(RankSigned(2), RankSigned(0))
+	if lo, hi, ok := ThresholdInterval(GT, lenDom, seenPos); !ok || lo != RankSigned(0) || hi != RankSigned(1) {
+		t.Fatalf("ThresholdInterval(len > 0) = (%#x, %#x, %v), want [0, 1]", lo, hi, ok)
 	}
 
 	// Hole-jumping: (x & 0xF0) >= 0x18 (24) drops boundary, emits GE 16 and GT 32.

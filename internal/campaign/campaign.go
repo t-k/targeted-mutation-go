@@ -97,6 +97,7 @@ type session struct {
 	testOverlays []target.Replacement
 	virtualDirs  map[string]string
 	testedDeps   map[string]bool
+	workerProcs  int
 }
 
 func Run(ctx context.Context, cfg Config) (Report, error) {
@@ -201,7 +202,11 @@ func Run(ctx context.Context, cfg Config) (Report, error) {
 	if resolvedScratch, evalErr := filepath.EvalSymlinks(scratch); evalErr == nil {
 		scratch = resolvedScratch
 	}
-	s := session{cfg: cfg, env: env, scratch: scratch, packages: packages, testPackages: packages, shard: shard}
+	workerProcs := 0
+	if cfg.Jobs > 1 {
+		workerProcs = max(1, runtime.GOMAXPROCS(0)/cfg.Jobs)
+	}
+	s := session{cfg: cfg, env: env, scratch: scratch, packages: packages, testPackages: packages, shard: shard, workerProcs: workerProcs}
 	if testPackages != nil {
 		s.testPackages = testPackages
 	} else if len(cfg.TestPatterns) != 0 && !cfg.List {
@@ -240,6 +245,7 @@ func Run(ctx context.Context, cfg Config) (Report, error) {
 		cancel()
 	}
 	baselineConfig := s
+	baselineConfig.workerProcs = 0
 	if !explicitTimeout {
 		baselineConfig.cfg.Timeout = min(s.cfg.BuildTimeout, 2*time.Minute)
 	}
@@ -250,11 +256,15 @@ func Run(ctx context.Context, cfg Config) (Report, error) {
 	if s.cfg.TestRun != "" && countRunEvents(base.inventory) == 0 {
 		return report, fmt.Errorf("no tests matched --test %q", s.cfg.TestRun)
 	}
+	baselineTestElapsed := base.maxTestElapsed
+	if !base.hasTestElapsed {
+		baselineTestElapsed = base.elapsed
+	}
 	if !explicitTimeout {
-		s.cfg.Timeout = max(10*time.Second, 5*time.Second+5*base.elapsed)
-	} else if base.elapsed >= s.cfg.Timeout && s.cfg.Warn != nil {
+		s.cfg.Timeout = 5*time.Second + 5*baselineTestElapsed
+	} else if baselineTestElapsed >= s.cfg.Timeout && s.cfg.Warn != nil {
 		fmt.Fprintf(s.cfg.Warn, "warning: baseline took %s, meeting or exceeding --timeout %s\n",
-			base.elapsed.Round(time.Millisecond), s.cfg.Timeout)
+			baselineTestElapsed.Round(time.Millisecond), s.cfg.Timeout)
 	}
 	if s.journal != nil {
 		s.baselineKey = canonicalBaselineKey(base.packages, base.inventory)
@@ -286,25 +296,52 @@ func Run(ctx context.Context, cfg Config) (Report, error) {
 	reached := s.reachedConsumers()
 	var allObserved []Finding
 	probeJobs := s.plan(&report, reached, &allObserved)
+	replayTotal := 0
+	for _, job := range probeJobs {
+		if len(job.consumers) > 0 {
+			replayTotal++
+		}
+	}
+	probeProgress := startProgress(s.cfg.Warn, "probe replays", replayTotal)
 	results := parallel(ctx, cfg.Jobs, len(probeJobs), func(i int) sourceResult {
 		job := probeJobs[i]
-		return s.cachedEdit(job.finding, job.site, job.consumers, func() sourceResult {
+		if len(job.consumers) == 0 {
+			return sourceResult{}
+		}
+		res := s.cachedEdit(job.finding, job.site, job.consumers, func() sourceResult {
 			result := s.replay(ctx, job)
 			return sourceResult{jobResult: result, replays: result.runs}
 		})
+		probeProgress.record(res.finding.Status)
+		return res
 	})
+	probeProgress.stop()
 	if err := ctx.Err(); err != nil {
 		return report, err
 	}
+	probeRechecks := 0
+	if s.cfg.TimeoutRecheck == "serial" && s.cfg.Jobs > 1 {
+		for i := range results {
+			if results[i].finding.Status == "timeout" && !results[i].resumed {
+				probeRechecks++
+			}
+		}
+	}
+	probeRecheckProgress := startProgress(s.cfg.Warn, "serial timeout rechecks", probeRechecks)
 	for i := range results {
 		item := &results[i]
 		if item.err != nil {
+			probeRecheckProgress.stop()
 			return report, item.err
 		}
 		if item.finding.Status == "timeout" && !item.resumed && s.cfg.TimeoutRecheck == "serial" {
 			if s.cfg.Jobs > 1 {
-				rechecked := s.replay(ctx, probeJobs[i])
+				serialSession := s
+				serialSession.cfg.Jobs = 1
+				serialSession.workerProcs = 0
+				rechecked := serialSession.replay(ctx, probeJobs[i])
 				if rechecked.err != nil {
+					probeRecheckProgress.stop()
 					return report, rechecked.err
 				}
 				item.replays += rechecked.runs
@@ -314,6 +351,7 @@ func Run(ctx context.Context, cfg Config) (Report, error) {
 				item.finding.Status, item.finding.Detail = "killed", "killed by timeout"
 				item.timedOutKilled = true
 			}
+			probeRecheckProgress.record(item.finding.Status)
 		}
 		report.Replays += item.replays
 		if item.resumed {
@@ -325,52 +363,84 @@ func Run(ctx context.Context, cfg Config) (Report, error) {
 		}
 		s.recordFinding(&report, item.finding, item.timedOutKilled)
 	}
+	probeRecheckProgress.stop()
+	sourceProgress := startProgress(s.cfg.Warn, "source mutations", len(s.sources))
 	sourceResults := parallel(ctx, cfg.Jobs, len(s.sources), func(i int) sourceResult {
 		job := s.sources[i]
+		var res sourceResult
 		if job.edit != nil && job.edit.Site != nil {
 			site := job.edit.Site
-			return s.cachedEdit(job.finding, site, reached[site.ID], func() sourceResult {
+			res = s.cachedEdit(job.finding, site, reached[site.ID], func() sourceResult {
 				return s.runSourceComparison(ctx, job, reached[site.ID], base)
 			})
+		} else {
+			res = s.cachedEdit(job.finding, nil, nil, func() sourceResult {
+				return sourceResult{jobResult: s.runSource(ctx, job, base)}
+			})
 		}
-		return s.cachedEdit(job.finding, nil, nil, func() sourceResult {
-			return sourceResult{jobResult: s.runSource(ctx, job, base)}
-		})
+		sourceProgress.record(res.finding.Status)
+		return res
 	})
+	sourceProgress.stop()
 	if err := ctx.Err(); err != nil {
 		return report, err
 	}
+	sourceRechecks := 0
+	if s.cfg.TimeoutRecheck == "serial" && s.cfg.Jobs > 1 {
+		for i := range sourceResults {
+			if sourceResults[i].finding.Status == "timeout" && !sourceResults[i].resumed {
+				sourceRechecks++
+			}
+		}
+	}
+	sourceRecheckProgress := startProgress(s.cfg.Warn, "serial timeout rechecks", sourceRechecks)
 	for i := range sourceResults {
 		item := &sourceResults[i]
 		if item.err != nil {
+			sourceRecheckProgress.stop()
 			return report, item.err
 		}
 		job := s.sources[i]
-		if item.finding.Status == "timeout" && !item.resumed && s.cfg.TimeoutRecheck == "serial" && s.cfg.Jobs > 1 {
-			if job.edit != nil && job.edit.Site != nil {
+		if item.finding.Status == "timeout" && !item.resumed && s.cfg.TimeoutRecheck == "serial" {
+			if s.cfg.Jobs > 1 {
 				serialSession := s
 				serialSession.cfg.Jobs = 1
-				rechecked := serialSession.runSourceComparison(ctx, job, reached[job.edit.Site.ID], base)
-				if rechecked.err != nil {
-					return report, rechecked.err
+				serialSession.workerProcs = 0
+				if job.edit != nil && job.edit.Site != nil {
+					rechecked := serialSession.runSourceComparison(ctx, job, reached[job.edit.Site.ID], base)
+					if rechecked.err != nil {
+						sourceRecheckProgress.stop()
+						return report, rechecked.err
+					}
+					item.replays += rechecked.replays
+					item.runs += rechecked.runs
+					item.finding = rechecked.finding
+					item.deadlineExceeded = rechecked.deadlineExceeded
+					item.timedOutKilled = rechecked.timedOutKilled
+				} else {
+					rechecked := serialSession.runSource(ctx, job, base)
+					if rechecked.err != nil {
+						sourceRecheckProgress.stop()
+						return report, rechecked.err
+					}
+					item.runs += rechecked.runs
+					item.finding = rechecked.finding
+					item.deadlineExceeded = rechecked.deadlineExceeded
 				}
-				item.replays += rechecked.replays
-				item.runs += rechecked.runs
-				item.finding = rechecked.finding
-				item.timedOutKilled = rechecked.timedOutKilled
-				if s.journal != nil && checkpointVerdict(item.finding.Status) && !item.timedOutKilled && item.finding.Detail != "killed by timeout" {
-					_ = s.storeCachedFinding(job.finding, job.edit.Site, reached[job.edit.Site.ID], item.finding)
+			}
+			if item.finding.Status == "timeout" && item.deadlineExceeded {
+				item.finding.Status, item.finding.Detail = "killed", "killed by timeout"
+				item.timedOutKilled = true
+			}
+			sourceRecheckProgress.record(item.finding.Status)
+			if s.journal != nil && checkpointVerdict(item.finding.Status) && !item.timedOutKilled && item.finding.Detail != "killed by timeout" {
+				var site *target.Site
+				var siteReached []*consumer
+				if job.edit != nil && job.edit.Site != nil {
+					site = job.edit.Site
+					siteReached = reached[site.ID]
 				}
-			} else {
-				rechecked := s.runSource(ctx, job, base)
-				if rechecked.err != nil {
-					return report, rechecked.err
-				}
-				item.runs += rechecked.runs
-				item.finding = rechecked.finding
-				if s.journal != nil && checkpointVerdict(item.finding.Status) {
-					_ = s.storeCachedFinding(job.finding, nil, nil, item.finding)
-				}
+				_ = s.storeCachedFinding(job.finding, site, siteReached, item.finding)
 			}
 		}
 		report.SourceRuns += item.runs
@@ -385,6 +455,7 @@ func Run(ctx context.Context, cfg Config) (Report, error) {
 		}
 		s.recordFinding(&report, item.finding, item.timedOutKilled)
 	}
+	sourceRecheckProgress.stop()
 	if cfg.Audit != 0 {
 		beforeAuditLen := len(report.Findings)
 		if err := s.auditProbes(ctx, &report, probeJobs, results, base); err != nil {
@@ -657,7 +728,7 @@ func (s *session) buildTest(ctx context.Context, overlay string, bin *consumer, 
 	}
 	args = append(args, s.buildFlags()...)
 	args = append(args, bin.pkg)
-	build := runCommand(ctx, s.cfg.BuildTimeout, s.cfg.Dir, cleanEnv(), "go", args...)
+	build := runCommand(ctx, s.cfg.BuildTimeout, s.cfg.Dir, s.workerEnv(), "go", args...)
 	if build.kind != "passed" {
 		return fmt.Errorf("test build %s for %s:\n%s", build.kind, bin.pkg, build.detail)
 	}
@@ -676,11 +747,18 @@ func (s *session) runBinary(ctx context.Context, bin *consumer, trace, mutation,
 }
 
 func (s *session) runBinaryPattern(ctx context.Context, bin *consumer, trace, mutation, pattern string) commandResult {
+	return s.runBinaryOptions(ctx, bin, trace, mutation, pattern, mutation != "")
+}
+
+func (s *session) runBinaryOptions(ctx context.Context, bin *consumer, trace, mutation, pattern string, failfast bool) commandResult {
 	args := []string{"-test.v=test2json", "-test.timeout=" + s.cfg.Timeout.String()}
+	if failfast {
+		args = append(args, "-test.failfast")
+	}
 	if pattern != "" {
 		args = append(args, "-test.run="+pattern)
 	}
-	return runCommand(ctx, s.cfg.Timeout+2*time.Second, bin.dir, binaryEnv(s.env, trace, mutation), bin.binary, args...)
+	return runCommand(ctx, s.cfg.Timeout+2*time.Second, bin.dir, s.binaryWorkerEnv(trace, mutation), bin.binary, args...)
 }
 
 func (s *session) buildFlags() []string {
@@ -692,14 +770,25 @@ func (s *session) buildFlags() []string {
 }
 
 func (s *session) goTest(ctx context.Context, overlay string, patterns ...string) commandResult {
-	if len(s.virtualDirs) != 0 {
-		return s.goTestWithVirtualPackages(ctx, overlay)
-	}
-	return s.goTestCommand(ctx, overlay, patterns...)
+	return s.goTestMode(ctx, overlay, false, patterns...)
 }
 
-func (s *session) goTestCommand(ctx context.Context, overlay string, patterns ...string) commandResult {
+func (s *session) goTestMutant(ctx context.Context, overlay string, patterns ...string) commandResult {
+	return s.goTestMode(ctx, overlay, true, patterns...)
+}
+
+func (s *session) goTestMode(ctx context.Context, overlay string, failfast bool, patterns ...string) commandResult {
+	if len(s.virtualDirs) != 0 {
+		return s.goTestWithVirtualPackages(ctx, overlay, failfast)
+	}
+	return s.goTestCommand(ctx, overlay, failfast, patterns...)
+}
+
+func (s *session) goTestCommand(ctx context.Context, overlay string, failfast bool, patterns ...string) commandResult {
 	args := []string{"test", "-json", "-count=1", "-timeout=" + s.cfg.Timeout.String(), "-p=" + strconv.Itoa(s.cfg.Jobs)}
+	if failfast {
+		args = append(args, "-failfast")
+	}
 	if s.cfg.TestRun != "" {
 		args = append(args, "-run=" + s.cfg.TestRun)
 	}
@@ -710,7 +799,7 @@ func (s *session) goTestCommand(ctx context.Context, overlay string, patterns ..
 	}
 	args = append(args, s.buildFlags()...)
 	args = append(args, patterns...)
-	return runCommand(ctx, s.cfg.BuildTimeout, s.cfg.Dir, cleanEnv(), "go", args...)
+	return runCommand(ctx, s.cfg.BuildTimeout, s.cfg.Dir, s.workerEnv(), "go", args...)
 }
 
 func (s *session) reachedConsumers() [][]*consumer {

@@ -20,6 +20,9 @@ func TestCLIHelpAndInvalidArgs(t *testing.T) {
 	}{
 		{[]string{"--help"}, 0, "targeted-mutation-go analyze"},
 		{[]string{"analyze", "--jobs=0"}, 1, "positive"},
+		{[]string{"analyze", "--build-timeout=0s"}, 1, "positive"},
+		{[]string{"analyze", "--dir"}, 1, "flag needs an argument"},
+		{[]string{"analyze", ".", "--dir"}, 1, "flag needs an argument"},
 		{[]string{"analyze", "--format=xml"}, 1, "format"},
 		{[]string{"analyze", "--undo-changes"}, 1, "--since"},
 		{[]string{"analyze", "--conventional", "--verify-witnesses"}, 1, "--conventional"},
@@ -62,5 +65,20 @@ func TestFree(t *testing.T) {
 	if report.Schema != 1 || len(report.Findings) != 1 || report.Findings[0].Witness == nil ||
 		!report.Findings[0].Witness.Verified || report.Findings[0].Witness.Input != "4999" {
 		t.Fatalf("incorrect report: %s", &stdout)
+	}
+
+	// Verify interspersed flags after package pattern and clean --list text summary without empty [].
+	stdout.Reset()
+	stderr.Reset()
+	if listCode := Execute(context.Background(), []string{"analyze", ".", "--dir", dir, "--jobs=1", "--list"}, &stdout, &stderr); listCode != 0 {
+		t.Fatalf("--list with interspersed flags failed (%d): %s", listCode, &stderr)
+	}
+	if strings.Contains(stdout.String(), "[]") || !strings.Contains(stdout.String(), "1 sites, 3 candidates") {
+		t.Fatalf("unexpected --list text output:\n%s", &stdout)
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if dashCode := Execute(context.Background(), []string{"analyze", "--dir", dir, "--list", "--", "."}, &stdout, &stderr); dashCode != 0 {
+		t.Fatalf("--list with -- separator failed (%d): %s", dashCode, &stderr)
 	}
 }

@@ -184,7 +184,7 @@ Each evaluated finding carries an `evidence` tag in text (`[...]`) and JSON:
 
 Every evaluated JSON report satisfies three accounting identities (with `timed_out` omitted when `0`):
 - `mutants_run == killed + survived` (total evaluated verdicts including observation-pruned and checkpoint-resumed mutants; actual executions are reported in `mutation_replays` and `source_runs`)
-- `timed_out <= killed` (probe mutations that genuinely exceed the timeout after changing a comparison decision on serial recheck are counted as `killed` and `timed_out`)
+- `timed_out <= killed` (probe and source mutations confirmed to exceed the test timeout on serial recheck are counted as `killed` and `timed_out`)
 - `survived == survivor_breakdown.reported + survivor_breakdown.suppressed`
 
 Format guarantees:
@@ -250,7 +250,7 @@ targeted-mutation-go analyze --full --checkpoint .tmt-campaign.jsonl --audit 5 .
 
 ### CLI option reference
 
-Flags must precede package patterns (`targeted-mutation-go analyze [flags] [packages...]`; patterns default to `./...`).
+Flags and package patterns may appear in any order (`targeted-mutation-go analyze [flags] [packages...]`; patterns default to `./...`, and `--` ends flag parsing). Long-running phases emit periodic 5-second progress summaries to `stderr` without affecting `stdout`.
 
 #### Target & Scope
 
@@ -297,8 +297,8 @@ Flags must precede package patterns (`targeted-mutation-go analyze [flags] [pack
 | `--write-baseline <FILE>` | — | Atomically write current gap IDs from a complete campaign (`incomplete == 0`) to `<FILE>` |
 | `--shard <K/N>` | — | Deterministically assign candidate IDs to zero-based shard `K` of `N` (`0 <= K < N`) |
 | `--checkpoint <FILE>` | — | Lock and resume completed verdicts from a crash-safe JSONL journal when the campaign fingerprint matches |
-| `--jobs <N>` | `min(4, GOMAXPROCS)` | Maximum concurrent build or mutation worker goroutines |
-| `--timeout <DUR>` | `max(10s, 5s + 5×baseline)` | Per-test-package timeout (warns on stderr if baseline duration meets or exceeds an explicit `--timeout`) |
+| `--jobs <N>` | `min(4, GOMAXPROCS)` | Maximum concurrent build or mutation worker goroutines (automatically budgets per-worker `GOMAXPROCS` when `N > 1`) |
+| `--timeout <DUR>` | `5s + 5×test_runtime` | Per-test-package timeout derived from pure baseline test execution time (warns on stderr if baseline test runtime meets or exceeds an explicit `--timeout`) |
 | `--timeout-recheck <MODE>` | `serial` | Recheck parallel worker timeouts serially (`serial`) or leave unconfirmed (`none`) |
 | `--build-timeout <DUR>` | `5m` | Timeout per `go test`, `go list`, or `go test -c` build command |
 
@@ -320,10 +320,10 @@ flowchart LR
 ```
 
 1. **Typed package discovery.** Loads target packages with `golang.org/x/tools/go/packages` under the active build tags and `GOOS`/`GOARCH`. Integer comparisons (including named integer types, `int`/`uint`/`uintptr`, and built-in `len`/`cap`) and float comparisons (`float32`/`float64`) are instrumented where evaluation order cannot change; `--full` additionally instruments string comparisons. Synthetic probe files are named to sort before all package `.go` files and use zero-initialized lazy state so Go package-level `var` initialization order is never altered.
-2. **Dual baseline verification & adaptive timeout.** Runs `go test -json -count=1` (including default `go vet`), derives an adaptive per-package timeout (`max(10s, 5s + 5×baseline)` when `--timeout` is unset), compiles one instrumented `.test` binary per non-skipped consumer package inside a temporary `go -overlay`, and verifies identical test inventories.
+2. **Dual baseline verification & adaptive timeout.** Runs `go test -json -count=1` (including default `go vet`), derives an adaptive per-package timeout (`5s + 5×test_runtime` from `go test -json` package execution durations when `--timeout` is unset), compiles one instrumented `.test` binary per non-skipped consumer package inside a temporary `go -overlay`, and verifies identical test inventories.
 3. **Lock-free shared-memory tracing.** During the baseline run, each comparison site updates a 40-byte `mmap` slot (`Flags` including IEEE-754 `Unordered` bit `32` for `NaN`, `Below`, `~Above`, `~BelowGap`, `~AboveGap`) using Go 1.18-compatible `sync/atomic` compare-and-swap loops, mapping signed integers to monotonic `uint64` ranks via `uint64(v) ^ (1 << 63)`.
-4. **Interval/margin planning, verified activation & process cleanup.** From recorded extrema and rank gaps, the planner computes observation-equivalent threshold intervals (jumping across impossible bitmask holes and exact small-modulus remainders) and overflow-free variable-RHS margins (`a >= b ± 1`), skipping provable survivors (`observed`). Remaining candidates run in dedicated process groups (`Setpgid`) with private `mmap` traces; process groups are terminated (`SIGKILL`) after every normal or timed-out exit. Parallel timeouts are rechecked serially (`--timeout-recheck serial`), and probe timeouts confirmed to have reached and flipped the comparison (`flags & 24 == 24`) are counted as `killed` (`timed_out`).
-5. **Hybrid `--full` routing & source repair.** Reached `--full` comparison operator swaps, `±1` literal steps, `!(cond)` negations (excluding ordered float comparisons where `NaN` semantics differ), and side-effect-free `true`/`false` comparison replacements reuse prebuilt probe binaries, falling back to isolated source overlays when unreached or unconfirmed. Source overlays retry once when an edit leaves an unused local variable (`_ = &x`) or import (`_ "pkg"`).
+4. **Interval/margin planning, verified activation & process cleanup.** From recorded extrema and rank gaps, the planner computes observation-equivalent threshold intervals (clamped to attainable bounds and jumping across impossible bitmask holes and exact small-modulus remainders) and overflow-free variable-RHS margins (`a >= b ± 1`), skipping provable survivors (`observed`). Remaining candidates run with `-failfast` in dedicated process groups (`Setpgid`) with private `mmap` traces; process groups (`pid > 1`) are terminated (`SIGKILL`) after every normal or timed-out exit. Parallel timeouts are rechecked serially (`--timeout-recheck serial`), and confirmed probe and source test timeouts are counted as `killed` (`timed_out`).
+5. **Hybrid `--full` routing, equivalent-bound pruning & source repair.** Reached `--full` comparison operator swaps (excluding provably equivalent minimum-bound swaps such as `s == ""` → `s <= ""` or `len(x) != 0` → `len(x) > 0`, and excluding struct reflection tags), `±1` literal steps, `!(cond)` negations (excluding ordered float comparisons where `NaN` semantics differ), and side-effect-free `true`/`false` comparison replacements reuse prebuilt probe binaries, falling back to isolated source overlays when unreached or unconfirmed. Source overlays retry once when an edit leaves an unused local variable (`_ = &x`) or import (`_ "pkg"`).
 
 ---
 

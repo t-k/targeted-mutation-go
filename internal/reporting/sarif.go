@@ -311,11 +311,11 @@ func isPhysicallyAllowed(source, repoBase string, workspaceDirs []string) bool {
 	if !existing {
 		return true
 	}
-	if realRepo, err := filepath.EvalSymlinks(repoBase); err == nil && (realSource == realRepo || isWithinDir(realRepo, realSource)) {
+	if realRepo, err := filepath.EvalSymlinks(repoBase); err == nil && isWithinDir(realRepo, realSource) {
 		return true
 	}
 	for _, dir := range workspaceDirs {
-		if realDir, err := filepath.EvalSymlinks(dir); err == nil && (realSource == realDir || isWithinDir(realDir, realSource)) {
+		if realDir, err := filepath.EvalSymlinks(dir); err == nil && isWithinDir(realDir, realSource) {
 			return true
 		}
 	}

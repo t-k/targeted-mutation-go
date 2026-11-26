@@ -73,6 +73,9 @@ func (e *sourceEdits) visit(node ast.Node, ancestors []ast.Node) bool {
 	case *ast.UnaryExpr:
 		e.unary(n)
 	case *ast.BasicLit:
+		if field, ok := parent.(*ast.Field); ok && field.Tag == n {
+			return false
+		}
 		e.literal(n)
 	case *ast.Ident:
 		switch {
@@ -195,7 +198,8 @@ func (e *sourceEdits) binary(n *ast.BinaryExpr, parent ast.Node) {
 			continue
 		}
 		for _, replacement := range family {
-			if n.Op == replacement || (n.Op == token.ADD || n.Op == token.SUB) && replacement == token.REM {
+			if n.Op == replacement || (n.Op == token.ADD || n.Op == token.SUB) && replacement == token.REM ||
+				e.isMinBoundEquivalent(n, replacement) {
 				continue
 			}
 			other := operator(replacement)
@@ -237,6 +241,44 @@ func (e *sourceEdits) binary(n *ast.BinaryExpr, parent ast.Node) {
 	if n.Op == token.NEQ && (e.errorAndNil(n.X, n.Y) || e.errorAndNil(n.Y, n.X)) {
 		e.boolean(n, false, "error-check")
 	}
+}
+
+func (e *sourceEdits) isMinBoundEquivalent(n *ast.BinaryExpr, replacement token.Token) bool {
+	if e.rawSource || e.pkg == nil || e.pkg.TypesInfo == nil || (n.Op != token.EQL && n.Op != token.NEQ) {
+		return false
+	}
+	if e.exprAtMinBound(n.X, n.Y) {
+		return n.Op == token.EQL && replacement == token.LEQ || n.Op == token.NEQ && replacement == token.GTR
+	}
+	if e.exprAtMinBound(n.Y, n.X) {
+		return n.Op == token.EQL && replacement == token.GEQ || n.Op == token.NEQ && replacement == token.LSS
+	}
+	return false
+}
+
+func (e *sourceEdits) exprAtMinBound(variable, bound ast.Expr) bool {
+	info := e.pkg.TypesInfo
+	tv := info.Types[bound]
+	varTV := info.Types[variable]
+	if tv.Value == nil || varTV.Type == nil {
+		return false
+	}
+	basic, ok := varTV.Type.Underlying().(*types.Basic)
+	if !ok {
+		return false
+	}
+	if basic.Info()&types.IsString != 0 && tv.Value.Kind() == constant.String {
+		return constant.StringVal(tv.Value) == ""
+	}
+	if basic.Info()&types.IsInteger != 0 && tv.Value.Kind() == constant.Int && constant.Sign(tv.Value) == 0 {
+		if basic.Info()&types.IsUnsigned != 0 {
+			return true
+		}
+		if call, ok := ast.Unparen(variable).(*ast.CallExpr); ok && isLenOrCap(call, info) {
+			return true
+		}
+	}
+	return false
 }
 
 func (e *sourceEdits) joinsToken(pos token.Pos, original, replacement token.Token) bool {

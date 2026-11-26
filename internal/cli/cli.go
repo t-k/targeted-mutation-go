@@ -66,7 +66,7 @@ func Execute(ctx context.Context, args []string, out, errOut io.Writer) int {
 	options.StringVar(&cfg.Comparison, "comparison", "all", "comparison rules (all, boundary, or negation)")
 	options.StringVar(&cfg.Tags, "tags", "", "comma-separated Go build tags")
 	options.IntVar(&cfg.Jobs, "jobs", min(4, runtime.GOMAXPROCS(0)), "maximum concurrent build or mutation workers")
-	options.DurationVar(&cfg.Timeout, "timeout", 0, "timeout per test package process (default: adaptive 5s + 5x baseline, min 10s)")
+	options.DurationVar(&cfg.Timeout, "timeout", 0, "timeout per test package process (default: adaptive 5s + 5x test runtime)")
 	options.StringVar(&cfg.TimeoutRecheck, "timeout-recheck", "serial", "recheck parallel timeouts serially (serial or none)")
 	options.DurationVar(&cfg.BuildTimeout, "build-timeout", 5*time.Minute, "timeout per Go build or Go test command")
 	options.BoolVar(&cfg.Full, "full", false, "also run the source mutation catalogue")
@@ -91,7 +91,13 @@ func Execute(ctx context.Context, args []string, out, errOut io.Writer) int {
 	format := options.String("format", "text", "report format (text, json, jsonl, or sarif)")
 	baselinePath := options.String("baseline", "", "suppress known findings from this baseline file")
 	writeBaselinePath := options.String("write-baseline", "", "save findings from a complete campaign as a baseline")
-	if err := options.Parse(args[1:]); err != nil {
+	reordered, reorderErr := reorderAnalyzeArgs(options, args[1:])
+	if reorderErr != nil {
+		fmt.Fprintln(safeErr, reorderErr)
+		options.Usage()
+		return 1
+	}
+	if err := options.Parse(reordered); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return 0
 		}
@@ -249,7 +255,11 @@ func writeText(out io.Writer, report campaign.Report, showNonViable bool) error 
 			fmt.Fprintf(&text, "  expression: %s\n", SanitizeInline(finding.Expression))
 		}
 		if finding.Mutation != "" {
-			fmt.Fprintf(&text, "  mutation: %s [%s]\n", SanitizeInline(finding.Mutation), SanitizeInline(finding.Evidence))
+			if finding.Evidence != "" {
+				fmt.Fprintf(&text, "  mutation: %s [%s]\n", SanitizeInline(finding.Mutation), SanitizeInline(finding.Evidence))
+			} else {
+				fmt.Fprintf(&text, "  mutation: %s\n", SanitizeInline(finding.Mutation))
+			}
 		}
 		if len(finding.Interval) == 2 {
 			fmt.Fprintf(&text, "  observed-equivalent thresholds: %s..%s\n", SanitizeInline(finding.Interval[0]), SanitizeInline(finding.Interval[1]))
@@ -296,6 +306,15 @@ func writeText(out io.Writer, report campaign.Report, showNonViable bool) error 
 		}
 		text.WriteByte('\n')
 	}
+	if report.Evaluation == "listed" {
+		fmt.Fprintf(&text, "%d sites, %d candidates", report.Sites, len(report.Findings))
+		if report.Suppressed > 0 {
+			fmt.Fprintf(&text, ", %d suppressed", report.Suppressed)
+		}
+		text.WriteByte('\n')
+		_, err := io.WriteString(out, text.String())
+		return err
+	}
 	fmt.Fprintf(&text, "%d sites, %d test binaries, %d probe replays (%d avoided), %d source runs, %d killed",
 		report.Sites, report.Builds, report.Replays, report.Skipped, report.SourceRuns, report.Killed)
 	if report.TimedOut > 0 {
@@ -326,4 +345,43 @@ func writeSuggestion(out *strings.Builder, code string) {
 			fmt.Fprintf(out, "    %s\n", line)
 		}
 	}
+}
+
+type boolFlag interface {
+	flag.Value
+	IsBoolFlag() bool
+}
+
+func reorderAnalyzeArgs(fs *flag.FlagSet, args []string) ([]string, error) {
+	var flags, positional []string
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if arg == "--" {
+			flags = append(flags, "--")
+			positional = append(positional, args[i+1:]...)
+			break
+		}
+		if !strings.HasPrefix(arg, "-") || arg == "-" {
+			positional = append(positional, arg)
+			continue
+		}
+		flags = append(flags, arg)
+		trimmed := strings.TrimLeft(arg, "-")
+		if strings.IndexByte(trimmed, '=') >= 0 {
+			continue
+		}
+		f := fs.Lookup(trimmed)
+		if f == nil {
+			continue
+		}
+		if bf, ok := f.Value.(boolFlag); ok && bf.IsBoolFlag() {
+			continue
+		}
+		if i+1 >= len(args) {
+			return nil, fmt.Errorf("flag needs an argument: -%s", trimmed)
+		}
+		i++
+		flags = append(flags, args[i])
+	}
+	return append(flags, positional...), nil
 }

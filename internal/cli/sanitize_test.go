@@ -96,6 +96,21 @@ func TestSanitizeInline(t *testing.T) {
 			input: "head\x9b31mRED\x9b0m\x9d0;spoofed-title\x9c\x85tail",
 			want:  "headREDtail",
 		},
+		{
+			name:  "exact C1 CSI nF BiDi and EOF boundaries",
+			input: "a\x7fb\x80c\x9cd\x9fapc\x9ce\xa0f\u2029\u202a\u202eg\u202fh\u2065\u2066\u2069i\u206aj\x1b 0k\x1b/~l\x1b/\nm\x1b\nn\x1béo\x1b[0 @p\x1b[?/~q\x1b[?\nr\x1b[ ?s\x1b[ét\r",
+			want:  "abcde" + string(utf8.RuneError) + "f\u2029g\u202fh\u2065i\u206ajkl m n\u00e9opq r?s\u00e9t ",
+		},
+		{
+			name:  "trailing bare ESC and OSC ending with lone ESC at EOF",
+			input: "keep\x1b",
+			want:  "keep",
+		},
+		{
+			name:  "OSC ending with lone ESC at EOF",
+			input: "keep\x1b]0;unterminated\x1b",
+			want:  "keep",
+		},
 	}
 
 	for _, tc := range tests {

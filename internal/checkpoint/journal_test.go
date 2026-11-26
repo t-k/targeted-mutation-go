@@ -355,6 +355,51 @@ func TestRejectsSizeLimits(t *testing.T) {
 	if journal, err := Open[string](path, "campaign"); err == nil || journal != nil {
 		t.Fatalf("oversized checkpoint accepted: %v, %v", journal, err)
 	}
+
+	// Exact maxLineSize (1<<20) boundary tests for header and Put records.
+	const exactMaxLine = 1 << 20
+	// Header of exact maxLineSize vs maxLineSize+1 (note validText caps fingerprint at 4096, so pad JSON whitespace).
+	validHdrPrefix := `{"version":1,"fingerprint":"campaign"`
+	validHdrSuffix := "}\n"
+	exactHdr := validHdrPrefix + strings.Repeat(" ", exactMaxLine-len(validHdrPrefix)-len(validHdrSuffix)) + validHdrSuffix
+	exactHdrPath := filepath.Join(t.TempDir(), "exact-hdr.jsonl")
+	if err := os.WriteFile(exactHdrPath, []byte(exactHdr), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if j, err := Open[string](exactHdrPath, "campaign"); err != nil {
+		t.Fatalf("exact maxLineSize header rejected: %v", err)
+	} else {
+		_ = j.Close()
+	}
+	overHdr := validHdrPrefix + strings.Repeat(" ", exactMaxLine+1-len(validHdrPrefix)-len(validHdrSuffix)) + validHdrSuffix
+	overHdrPath := filepath.Join(t.TempDir(), "over-hdr.jsonl")
+	if err := os.WriteFile(overHdrPath, []byte(overHdr), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if j, err := Open[string](overHdrPath, "campaign"); !errors.Is(err, ErrCorrupt) || j != nil {
+		t.Fatalf("maxLineSize+1 header accepted: %v, %v", j, err)
+	}
+
+	// Put record of exact maxLineSize vs maxLineSize+1, and data of exact maxLineSize.
+	linePath := filepath.Join(t.TempDir(), "exact-line.jsonl")
+	lj, err := Open[string](linePath, "campaign")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = lj.Close() })
+	// json.Marshal(string) adds 2 quotes; record wrapper `{"key":"k","result":"..."}` + `\n` adds 23 bytes total around raw string.
+	const wrapperOverhead = len(`{"key":"k","result":""}` + "\n")
+	if err := lj.Put("k", strings.Repeat("a", exactMaxLine-wrapperOverhead)); err != nil {
+		t.Fatalf("Put of exact maxLineSize line rejected: %v", err)
+	}
+	if err := lj.Put("k2", strings.Repeat("a", exactMaxLine-wrapperOverhead)); err == nil {
+		// "k2" adds 1 byte -> exactMaxLine + 1!
+		t.Fatalf("Put of maxLineSize+1 line accepted")
+	}
+	// len(data) == exactMaxLine (raw string of exactMaxLine - 2 quotes) must be rejected at len(data) >= maxLineSize.
+	if err := lj.Put("k3", strings.Repeat("a", exactMaxLine-2)); err == nil {
+		t.Fatalf("Put with len(data) == maxLineSize accepted")
+	}
 }
 
 func readFile(t *testing.T, path string) string {

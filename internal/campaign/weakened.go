@@ -233,7 +233,7 @@ func (s *session) testDirectory(pkg target.Package) string {
 	return pkg.Dir
 }
 
-func (s *session) goTestWithVirtualPackages(ctx context.Context, overlay string) commandResult {
+func (s *session) goTestWithVirtualPackages(ctx context.Context, overlay string, failfast bool) commandResult {
 	var physical, virtual []target.Package
 	for _, pkg := range s.testPackages {
 		if s.virtualDirs[pkg.Path] == "" {
@@ -248,8 +248,11 @@ func (s *session) goTestWithVirtualPackages(ctx context.Context, overlay string)
 		for i, pkg := range physical {
 			patterns[i] = pkg.Path
 		}
-		result = s.goTestCommand(ctx, overlay, patterns...)
+		result = s.goTestCommand(ctx, overlay, failfast, patterns...)
 		if result.kind != "passed" && result.kind != "failed" {
+			return result
+		}
+		if failfast && result.kind == "failed" {
 			return result
 		}
 		if result.inventory == nil {
@@ -269,13 +272,20 @@ func (s *session) goTestWithVirtualPackages(ctx context.Context, overlay string)
 		if err := s.buildTest(ctx, overlay, &bin, 1, true); err != nil {
 			return commandResult{kind: "error", detail: err.Error()}
 		}
-		run := s.runBinary(ctx, &bin, "", "", "")
+		run := s.runBinaryOptions(ctx, &bin, "", "", "", failfast)
 		switch run.kind {
 		case "passed":
 			result.packages[pkg.Path] = "pass"
+			result.hasTestElapsed = true
+			if run.elapsed > result.maxTestElapsed {
+				result.maxTestElapsed = run.elapsed
+			}
 		case "failed":
 			result.kind, result.packages[pkg.Path] = "failed", "fail"
 			result.failed = append(result.failed, run.failed...)
+			if failfast {
+				return result
+			}
 		default:
 			return run
 		}

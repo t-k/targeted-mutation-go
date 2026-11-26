@@ -554,13 +554,16 @@ func TestInitOrderAndFloat(t *testing.T) {
 		t.Fatalf("go vet failed: %v\n%s", err, out)
 	}
 
+	baseEnv := slices.DeleteFunc(os.Environ(), func(entry string) bool {
+		return strings.HasPrefix(entry, "TMT_GO_TRACE=") || strings.HasPrefix(entry, "TMT_GO_MUTATION=")
+	})
 	tracePath := filepath.Join(t.TempDir(), "trace.bin")
 	if err := os.WriteFile(tracePath, make([]byte, siteID*BytesPerSite), 0600); err != nil {
 		t.Fatal(err)
 	}
 	cmd := exec.Command("go", "test", "-count=1", ".")
 	cmd.Dir = runDir
-	cmd.Env = append(os.Environ(), "TMT_GO_TRACE="+tracePath)
+	cmd.Env = append(slices.Clone(baseEnv), "TMT_GO_TRACE="+tracePath)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("instrumented test failed: %v\n%s", err, out)
 	}
@@ -607,7 +610,7 @@ func TestInitOrderAndFloat(t *testing.T) {
 	}
 	mutCmd := exec.Command("go", "test", "-count=1", ".")
 	mutCmd.Dir = runDir
-	mutCmd.Env = append(os.Environ(),
+	mutCmd.Env = append(slices.Clone(baseEnv),
 		"TMT_GO_TRACE="+mutTrace,
 		fmt.Sprintf("TMT_GO_MUTATION=%d:%d:0:margin-up", recordSiteID, analysis.GT.Mask()),
 	)
@@ -748,5 +751,104 @@ func f(x int) bool {
 	}
 	if _, ok := ignored[19]; ok {
 		t.Fatalf("tmt:ignored should not match: %+v", ignored)
+	}
+}
+
+func TestTargetBoundaryConditions(t *testing.T) {
+	// 1. followsIdentifierByte exact ASCII and UTF-8 boundaries.
+	for _, tc := range []struct {
+		b    byte
+		want bool
+	}{
+		{'`', false}, {'a', true}, {'z', true}, {'{', false},
+		{'@', false}, {'A', true}, {'Z', true}, {'[', false},
+		{'/', false}, {'0', true}, {'9', true}, {':', false},
+		{'_', true}, {0x7F, false}, {0x80, true},
+	} {
+		buf := []byte{tc.b, 'x'}
+		if got := followsIdentifierByte(buf, 1); got != tc.want {
+			t.Errorf("followsIdentifierByte(%#x) = %v, want %v", tc.b, got, tc.want)
+		}
+	}
+	if followsIdentifierByte([]byte("a"), 0) {
+		t.Fatal("start==0 must be false")
+	}
+
+	// 2. versionSupportsProbes boundaries.
+	for _, tc := range []struct {
+		v    string
+		want bool
+	}{
+		{"0.9", false}, {"1.17", false}, {"1.18", true}, {"1.22", true}, {"2.0", true},
+	} {
+		if got := versionSupportsProbes(tc.v); got != tc.want {
+			t.Errorf("versionSupportsProbes(%q) = %v, want %v", tc.v, got, tc.want)
+		}
+	}
+
+	// 3. ParseIgnoreComments at offset 0, 1-space indent, and EOF without trailing newline.
+	eofSrc := "// tmt:ignore: top\n // tmt:ignore: indented"
+	fset := token.NewFileSet()
+	eofAst, err := parser.ParseFile(fset, "eof.go", "package p\n"+eofSrc, parser.ParseComments|parser.SkipObjectResolution)
+	if err != nil {
+		t.Fatal(err)
+	}
+	eofIgnored := ParseIgnoreComments(fset, eofAst, []byte("package p\n"+eofSrc))
+	if eofIgnored[2] != "top" || eofIgnored[3] != "indented" {
+		t.Fatalf("unexpected EOF ignore map: %+v", eofIgnored)
+	}
+	if !isLineWhitespaceBefore([]byte("//"), 0) || isLineWhitespaceBefore([]byte("a"), -1) || isLineWhitespaceBefore([]byte("a"), 2) {
+		t.Fatal("isLineWhitespaceBefore bounds failed")
+	}
+	if !isLineWhitespaceAfter([]byte("//"), 2) || isLineWhitespaceAfter([]byte("a"), -1) || isLineWhitespaceAfter([]byte("a"), 2) {
+		t.Fatal("isLineWhitespaceAfter bounds failed")
+	}
+
+	// 4. Struct tags not mutated, min-bound == "" / != "" / == 0 equivalents omitted, slice-element-remove 8 vs 9, empty block/case, raw `%w`.
+	dir := t.TempDir()
+	write(t, dir, "go.mod", "module example.org/tbounds\n\ngo 1.26.0\n")
+	write(t, dir, "bounds.go", "package tbounds\n"+
+		"import (\n\t\"fmt\"\n\t\"slices\"\n)\n"+
+		"type Doc struct {\n\tName string `json:\"name\"`\n}\n"+
+		"func Check(s string, u uint, xs []int) error {\n"+
+		"\tif s == \"\" || s != \"\" || u == 0 || u != 0 || len(xs) == 0 || len(xs) != 0 {}\n"+
+		"\tswitch u { case 1: }\n"+
+		"\t_ = slices.Contains([]int{1, 2, 3, 4, 5, 6, 7, 8}, 1)\n"+
+		"\t_ = slices.Contains([]int{1, 2, 3, 4, 5, 6, 7, 8, 9}, 1)\n"+
+		"\treturn fmt.Errorf(`%w`, nil)\n"+
+		"}\n")
+	pkgs, err := Discover(context.Background(), dir, []string{"."}, "", nil, Discovery{Full: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	edits := pkgs[0].Files[0].Edits
+	sliceRemovals := 0
+	foundUnwrap := false
+	for _, e := range edits {
+		if e.Kind == "string-literal" && strings.Contains(e.Before, "json:") {
+			t.Fatalf("struct tag should not be mutated by string-literal: %+v", e)
+		}
+		if e.Kind == "source-operator" && e.Line == 10 &&
+			((e.Before == "==" && e.After == "<=") || (e.Before == "!=" && e.After == ">")) {
+			t.Fatalf("min-bound equivalent operator swap %s -> %s should be omitted: %+v", e.Before, e.After, e)
+		}
+		if e.Kind == "empty-block" && e.Line == 10 {
+			t.Fatalf("already-empty block must not emit empty-block: %+v", e)
+		}
+		if e.Kind == "empty-case" && e.Line == 11 {
+			t.Fatalf("already-empty case must not emit empty-case: %+v", e)
+		}
+		if e.Kind == "slice-element-remove" {
+			sliceRemovals++
+		}
+		if e.Kind == "errorf-unwrap" {
+			foundUnwrap = true
+		}
+	}
+	if sliceRemovals != 8 {
+		t.Fatalf("expected 8 slice-element-remove edits (from 8-element slice only, none from 9-element), got %d", sliceRemovals)
+	}
+	if !foundUnwrap {
+		t.Fatal("expected errorf-unwrap on raw `%w` literal")
 	}
 }
