@@ -16,6 +16,7 @@ var stringProbeSource string
 type Replacement struct {
 	Path      string
 	Line      int
+	EndLine   int
 	Data      []byte
 	Synthetic bool
 }

@@ -39,6 +39,15 @@ func Execute(ctx context.Context, args []string, out, errOut io.Writer) int {
 	var cfg campaign.Config
 	options.StringVar(&cfg.Dir, "dir", ".", "project or workspace directory")
 	options.StringVar(&cfg.Since, "since", "", "restrict sites to working-tree lines changed from this Git revision")
+	options.Func("lines", "restrict mutations to FILE, FILE:LINE, or FILE:FROM-TO (repeatable)", func(value string) error {
+		cfg.Lines = append(cfg.Lines, value)
+		return nil
+	})
+	options.Func("test-package", "run tests from this package pattern instead of the mutation patterns (repeatable)", func(value string) error {
+		cfg.TestPatterns = append(cfg.TestPatterns, value)
+		return nil
+	})
+	options.StringVar(&cfg.TestRun, "test", "", "select tests with a Go -run expression")
 	options.StringVar(&cfg.Comparison, "comparison", "all", "comparison rules (all, boundary, or negation)")
 	options.StringVar(&cfg.Tags, "tags", "", "comma-separated Go build tags")
 	options.IntVar(&cfg.Jobs, "jobs", min(4, runtime.GOMAXPROCS(0)), "maximum concurrent build or mutation workers")
@@ -81,7 +90,7 @@ func Execute(ctx context.Context, args []string, out, errOut io.Writer) int {
 		return 1
 	}
 	cfg.Patterns = options.Args()
-	for _, pattern := range cfg.Patterns {
+	for _, pattern := range append(append([]string(nil), cfg.Patterns...), cfg.TestPatterns...) {
 		if strings.HasSuffix(pattern, ".go") {
 			fmt.Fprintf(errOut, "expected a Go package pattern, got a file: %q\n", pattern)
 			return 1

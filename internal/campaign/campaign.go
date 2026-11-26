@@ -22,6 +22,9 @@ import (
 type Config struct {
 	Dir              string
 	Patterns         []string
+	TestPatterns     []string
+	Lines            []string
+	TestRun          string
 	Tags, Since      string
 	Comparison       string
 	Jobs             int
@@ -63,6 +66,7 @@ type session struct {
 	env          goEnvironment
 	scratch      string
 	packages     []target.Package
+	testPackages []target.Package
 	sites        []*target.Site
 	sources      []sourceJob
 	consumers    []consumer
@@ -112,6 +116,18 @@ func Run(ctx context.Context, cfg Config) (Report, error) {
 	if err != nil {
 		return report, err
 	}
+	if len(cfg.Lines) != 0 {
+		selected, err := explicitScope(cfg.Dir, cfg.Lines)
+		if err != nil {
+			return report, err
+		}
+		scope = intersectScope(scope, selected)
+		for dir, entries := range reversions {
+			reversions[dir] = slices.DeleteFunc(entries, func(entry target.Replacement) bool {
+				return !selected.Contains(entry.Path, entry.Line, entry.EndLine)
+			})
+		}
+	}
 	setup, cancel = context.WithTimeout(ctx, cfg.BuildTimeout)
 	packages, err := target.Discover(setup, cfg.Dir, cfg.Patterns, cfg.Tags, scope,
 		target.Discovery{Full: cfg.Full, SourceOnly: cfg.SourceOnly, IncludeGenerated: cfg.IncludeGenerated})
@@ -124,13 +140,21 @@ func Run(ctx context.Context, cfg Config) (Report, error) {
 		return report, err
 	}
 	defer os.RemoveAll(scratch)
-	s := session{cfg: cfg, env: env, scratch: scratch, packages: packages}
+	s := session{cfg: cfg, env: env, scratch: scratch, packages: packages, testPackages: packages}
+	if len(cfg.TestPatterns) != 0 {
+		setup, cancel := context.WithTimeout(ctx, cfg.BuildTimeout)
+		s.testPackages, err = resolveTestPackages(setup, cfg)
+		cancel()
+		if err != nil {
+			return report, err
+		}
+	}
 	s.replacements = s.collect(reversions)
 	report.Sites = len(s.sites)
 	if err := s.validateSnapshots(); err != nil {
 		return report, err
 	}
-	base := s.goTest(ctx, "", cfg.Patterns...)
+	base := s.goTest(ctx, "", s.testPatterns()...)
 	if base.kind != "passed" {
 		return report, fmt.Errorf("ordinary Go test baseline %s:\n%s", base.kind, base.detail)
 	}
@@ -257,8 +281,8 @@ func (s *session) collect(reverts map[string][]target.Replacement) []target.Repl
 }
 
 func (s *session) prepare(ctx context.Context, base commandResult, report *Report) error {
-	known := make(map[string]bool, len(s.packages))
-	for i, pkg := range s.packages {
+	known := make(map[string]bool, len(s.testPackages))
+	for i, pkg := range s.testPackages {
 		known[pkg.Path] = true
 		if base.packages[pkg.Path] == "skip" {
 			continue
@@ -342,6 +366,8 @@ func (s *session) runBinary(ctx context.Context, bin *consumer, trace, mutation,
 	args := []string{"-test.v=test2json", "-test.timeout=" + s.cfg.Timeout.String()}
 	if test != "" {
 		args = append(args, "-test.run=^"+test+"$")
+	} else if s.cfg.TestRun != "" {
+		args = append(args, "-test.run="+s.cfg.TestRun)
 	}
 	return runCommand(ctx, s.cfg.Timeout+2*time.Second, bin.dir, binaryEnv(s.env, trace, mutation), bin.binary, args...)
 }
@@ -356,6 +382,9 @@ func (s *session) buildFlags() []string {
 
 func (s *session) goTest(ctx context.Context, overlay string, patterns ...string) commandResult {
 	args := []string{"test", "-json", "-count=1", "-timeout=" + s.cfg.Timeout.String(), "-p=" + strconv.Itoa(s.cfg.Jobs)}
+	if s.cfg.TestRun != "" {
+		args = append(args, "-run="+s.cfg.TestRun)
+	}
 	if overlay != "" {
 		// The ordinary baseline has already passed vet. A source mutation can
 		// be executable Go even when a static quality check rejects it.

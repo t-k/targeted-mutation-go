@@ -96,7 +96,7 @@ func (s *session) runSource(ctx context.Context, job sourceJob, baseline command
 	}
 	serial := *s
 	serial.cfg.Jobs = 1
-	run := serial.goTest(ctx, overlay, s.cfg.Patterns...)
+	run := serial.goTest(ctx, overlay, s.testPatterns()...)
 	result.runs = 1
 	var diagnostics []compilerDiagnostic
 	if run.kind == "build-error" && job.edit != nil {
@@ -107,7 +107,7 @@ func (s *session) runSource(ctx context.Context, job sourceJob, baseline command
 				result.err = err
 				return result
 			}
-			run = serial.goTest(ctx, overlay, s.cfg.Patterns...)
+			run = serial.goTest(ctx, overlay, s.testPatterns()...)
 			result.runs++
 			diagnostics = candidateDiagnostics(run, s.cfg.Dir, overlayFile)
 		}

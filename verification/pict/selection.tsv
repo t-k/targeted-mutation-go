@@ -1,0 +1,9 @@
+Scope	Tests	Filter
+package	own	all
+line	dependent	boundary
+intersection	dependent	all
+file	own	boundary
+file	dependent	all
+package	dependent	boundary
+line	own	all
+intersection	own	boundary

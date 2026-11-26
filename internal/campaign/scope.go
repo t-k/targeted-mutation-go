@@ -90,7 +90,7 @@ func gitScope(ctx context.Context, dir, revision string, undo bool) (target.Scop
 			data = append(data, bytes.Join(previous[oldOffset:oldOffset+oldCount], nil)...)
 			data = append(data, bytes.Join(current[newOffset+newCount:], nil)...)
 			dir := filepath.Dir(path)
-			reverts[dir] = append(reverts[dir], target.Replacement{Path: path, Data: data, Line: line})
+			reverts[dir] = append(reverts[dir], target.Replacement{Path: path, Data: data, Line: line, EndLine: max(line, newStart+newCount-1)})
 		}
 	}
 	return scope, reverts, nil
