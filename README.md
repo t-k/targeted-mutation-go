@@ -33,7 +33,21 @@ targeted-mutation-go analyze --since "$base" --format=json ./...
 targeted-mutation-go analyze --since "$base" --undo-changes --full ./...
 ```
 
-`--since` scopes mutation candidates to changed lines, including untracked Go sources. `--undo-changes` restores each edit hunk of an existing file in a separate build overlay. It reports hunks whose restoration still passes the tests. `--full` adds source-level comparison, boolean connective, and basic arithmetic operators. Use `--tags` to select build tags and `--jobs` to control concurrent workers. Run `targeted-mutation-go analyze --help` for options.
+`--since` scopes mutation candidates to changed lines, including untracked Go sources. `--undo-changes` restores each edit hunk of an existing file in a separate build overlay. It reports hunks whose restoration still passes the tests. Use `--tags` to select build tags and `--jobs` to control concurrent workers. Run `targeted-mutation-go analyze --help` for options.
+
+## Source mutation catalogue
+
+`--full` combines the comparison probes with source mutations. `--source-only` runs the source catalogue with a separate overlay for each edit. Use `--include-generated` to add generated Go files.
+
+| Family | Supported edits |
+| --- | --- |
+| Comparisons | Boundary and negation changes plus other viable relational and equality replacements |
+| Arithmetic and bits | Arithmetic, bitwise and shift replacements, compound assignments, removal of the compound operator, sign changes, increment/decrement swaps |
+| Conditions and branches | Boolean operand replacement, logical swaps and removal of negation, forced and negated conditions, break/continue swaps, early range breaks, empty blocks and cases |
+| Values and returns | Integer and float literal steps, string and boolean literals, type-appropriate zero values, forced boolean returns, nil returns |
+| Errors and statements | Nil error checks, `%w` to `%v` error wrapping, statement deletion, discarded assignment results |
+
+The catalogue was built against Gremlins 0.6.0, gomutants 0.7.3, gomu 0.3.0 and go-mutants 0.1.2. The peer fixture checks representative outcomes across those versions. Actual candidates depend on the selected files, build tags, scope, and whether the edited program compiles. [Peer verification and performance](benchmarks/README.md)
 
 ## Findings
 
@@ -44,6 +58,7 @@ targeted-mutation-go analyze --since "$base" --undo-changes --full ./...
 | `SOURCE SURVIVOR` | The selected suite passed against a source-level edit. |
 | `UNTESTED CHANGE` | The selected suite passed after a Git hunk was restored. |
 | `UNREACHED` | The selected test binaries left this comparison unobserved. Use `--show-unreached` to list it. |
+| `NON VIABLE` | Compiler diagnostics attribute a build rejection to the edited candidate. |
 | `UNSTABLE`, `TIMEOUT`, `BUILD ERROR`, `ERROR` | The campaign could not establish a verdict. |
 
 A witness marked `verified` passed on the original and failed with the mutant applied. A suggested operand can be useful even when the tool cannot derive an end-to-end test call. Automatic witness compilation currently supports direct comparisons of a single integer parameter in a standalone function.
@@ -61,6 +76,8 @@ The probes support integer ordering and equality, including named integer types 
 
 Use explicit module package patterns at a workspace root that has no Go module, for example `./app/... ./lib/...`. Only compatible build flags are accepted in `GOFLAGS`. Pass test timeouts and build tags through the CLI.
 
+Source replay shares original snapshots and creates each edited file inside a worker. It can retry once when the edit leaves an unused import or local variable. The retry preserves import initialization and the local's initializer. The ordinary baseline runs Go vet. Source mutant verdicts come from the compiler and tests. Source discovery can include original Go files in cgo packages and uses the compiler to validate edits that require cgo.
+
 The command runs target build tools and tests with your permissions. Run it on code you trust. The tool's own source edits and test binaries live in temporary overlays.
 
 ## Development
@@ -73,6 +90,7 @@ python3 scripts/check-pict.py
 python3 scripts/check-mutants.py
 lean +leanprover/lean4:v4.36.0 verification/lean/Threshold.lean
 tla2tools -workers 2 verification/tla/Campaign.tla
+tla2tools -workers 2 verification/tla/SourceReplay.tla
 ```
 
 Lean checks integer ordering, summaries, and distinguishing inputs. TLC checks a finite model of baseline, worker, activation, and cleanup transitions. The Go tests exercise generated PICT combinations and real test binaries. The measured workloads and reproducible commands are in the [benchmark guide](benchmarks/README.md).

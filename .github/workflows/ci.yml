@@ -46,6 +46,7 @@ jobs:
           curl --fail --silent --show-error --location https://github.com/tlaplus/tlaplus/releases/download/v1.7.4/tla2tools.jar -o "$RUNNER_TEMP/tla2tools.jar"
           echo "936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88  $RUNNER_TEMP/tla2tools.jar" | sha256sum --check
           java -Xmx1g -jar "$RUNNER_TEMP/tla2tools.jar" -workers 2 -metadir "$RUNNER_TEMP/tlc" verification/tla/Campaign.tla
+          java -Xmx1g -jar "$RUNNER_TEMP/tla2tools.jar" -workers 2 -metadir "$RUNNER_TEMP/tlc-source" verification/tla/SourceReplay.tla
       - name: Check generated PICT rows
         run: |
           git clone --quiet --depth 1 --branch v3.7.4 https://github.com/microsoft/pict.git "$RUNNER_TEMP/pict"
