@@ -141,6 +141,40 @@ func TestPreviousTestsOverlayUsesGoWithAddedAndDeletedTests(t *testing.T) {
 	}
 }
 
+func TestPreviousTestsSkipSymlinkParents(t *testing.T) {
+	dir := t.TempDir()
+	outside := t.TempDir()
+	fixture(t, dir, "sub/deleted_test.go", "package fixture\n")
+	commitPRBase(t, dir)
+	if err := os.Remove(filepath.Join(dir, "sub", "deleted_test.go")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(dir, "sub")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(dir, "sub")); err != nil {
+		t.Fatal(err)
+	}
+	files, err := previousTestFiles(t.Context(), dir, "HEAD")
+	if err != nil || len(files) != 0 {
+		t.Fatalf("applied old tests through a symlink parent: %+v, %v", files, err)
+	}
+}
+
+func TestPRSubhunksSkipAmbiguousAndEquivalentRemovals(t *testing.T) {
+	const original = "package fixture\nfunc F(a, b bool) bool { return a }\n"
+	for _, expression := range []string{"a && b", "a && a && b"} {
+		current := []byte(strings.Replace(original, "return a", "return "+expression, 1))
+		source := parsePRSource("fixture.go", current)
+		if source == nil {
+			t.Fatal("invalid fixture")
+		}
+		if got := subHunkReverts(source, []byte(original), 0, len(current)); len(got) != 0 {
+			t.Fatalf("%s produced an ambiguous or token-equivalent edit: %+v", expression, got)
+		}
+	}
+}
+
 func runPRGit(t *testing.T, dir string, args ...string) {
 	t.Helper()
 	if _, err := git(t.Context(), dir, args...); err != nil {
@@ -222,11 +256,17 @@ func TestPRSubhunksPICT(t *testing.T) {
 				t.Fatalf("whole revert did not restore original: %q", items[0].Data)
 			}
 			seen := map[string]bool{old: true}
+			locations := make(map[[2]int]bool)
 			for _, item := range items[1:] {
 				if seen[string(item.Data)] || string(item.Data) == current {
 					t.Fatalf("duplicate or unchanged sub-hunk: %q", item.Data)
 				}
 				seen[string(item.Data)] = true
+				location := [2]int{item.Line, item.Column}
+				if locations[location] || item.Line < 1 || item.Column < 1 || item.EndLine < item.Line || item.Description == "" {
+					t.Fatalf("invalid sub-hunk location: %+v", item)
+				}
+				locations[location] = true
 				if _, err := parser.ParseFile(token.NewFileSet(), file, item.Data, 0); err != nil {
 					t.Fatal(err)
 				}
