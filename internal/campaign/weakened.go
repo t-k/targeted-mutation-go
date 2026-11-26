@@ -275,7 +275,7 @@ func (s *session) goTestWithVirtualPackages(ctx context.Context, overlay string,
 		if err := s.buildTest(ctx, overlay, &bin, 1, true); err != nil {
 			return commandResult{kind: "error", detail: err.Error()}
 		}
-		run := s.runBinaryOptions(ctx, &bin, "", "", "", failfast)
+		run := s.runBinaryOptions(ctx, &bin, "", "", s.cfg.TestRun, failfast)
 		switch run.kind {
 		case "passed":
 			result.packages[pkg.Path] = "pass"
@@ -326,7 +326,7 @@ func (s *session) previousCandidates(allObserved []Finding, changed target.Scope
 	}
 	var result []previousCandidate
 	for _, site := range s.sites {
-		if site.String || changed.Contains(site.File, site.StartLine, site.EndLine) {
+		if site.String || site.Arith || changed.Contains(site.File, site.StartLine, site.EndLine) {
 			continue
 		}
 		for _, candidate := range analysis.PreviewSite(site.Op, site.Domain, site.Margin, site.Float, !s.cfg.Conventional) {

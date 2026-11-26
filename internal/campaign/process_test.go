@@ -206,8 +206,8 @@ func TestWorkerEnvBudgetsGOMAXPROCS(t *testing.T) {
 		t.Fatalf("workerProcs=0 must not inject GOMAXPROCS=0")
 	}
 
-	binEnv := (&session{workerProcs: 3, env: goEnvironment{GOROOT: "/go"}}).binaryWorkerEnv("/tmp/t", "0:1:0:false")
-	if !slices.Contains(binEnv, "GOMAXPROCS=3") || !slices.Contains(binEnv, "TMT_GO_TRACE=/tmp/t") || !slices.Contains(binEnv, "TMT_GO_MUTATION=0:1:0:false") {
-		t.Fatalf("unexpected binaryWorkerEnv: %v", binEnv)
+	binEnv := binaryEnv(goEnvironment{GOROOT: "/go"}, "/tmp/t", "0:1:0:false")
+	if !slices.Contains(binEnv, "TMT_GO_TRACE=/tmp/t") || !slices.Contains(binEnv, "TMT_GO_MUTATION=0:1:0:false") {
+		t.Fatalf("unexpected binaryEnv: %v", binEnv)
 	}
 }

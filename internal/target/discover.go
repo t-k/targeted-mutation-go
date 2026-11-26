@@ -366,9 +366,14 @@ func makeArithSite(expr *ast.BinaryExpr, info *types.Info) bool {
 	if xType == nil || yType == nil {
 		return false
 	}
-	xOK := types.Identical(xType, resType) || info.Types[expr.X].Value != nil
-	yOK := types.Identical(yType, resType) || info.Types[expr.Y].Value != nil
-	if !xOK || !yOK {
+	xConcrete := types.Identical(xType, resType) && info.Types[expr.X].Value == nil && !hasContextualShift(expr.X, info)
+	yConcrete := types.Identical(yType, resType) && info.Types[expr.Y].Value == nil && !hasContextualShift(expr.Y, info)
+	xOK := xConcrete || info.Types[expr.X].Value != nil
+	yOK := yConcrete || info.Types[expr.Y].Value != nil
+	if !xOK || !yOK || (!xConcrete && !yConcrete) {
+		return false
+	}
+	if hasContextualShift(expr.X, info) || hasContextualShift(expr.Y, info) {
 		return false
 	}
 	// Do not shadow any nested comparison expression.
@@ -381,6 +386,24 @@ func makeArithSite(expr *ast.BinaryExpr, info *types.Info) bool {
 		return !hasComparison
 	})
 	return !hasComparison
+}
+
+func hasContextualShift(expr ast.Expr, info *types.Info) bool {
+	found := false
+	ast.Inspect(expr, func(n ast.Node) bool {
+		if found {
+			return false
+		}
+		b, ok := n.(*ast.BinaryExpr)
+		if ok && (b.Op == token.SHL || b.Op == token.SHR) {
+			if tv, ok := info.Types[b.X]; ok && tv.Value != nil {
+				found = true
+				return false
+			}
+		}
+		return true
+	})
+	return found
 }
 
 func parameterOrLiteral(expr ast.Expr, fn *ast.FuncDecl, info *types.Info) bool {

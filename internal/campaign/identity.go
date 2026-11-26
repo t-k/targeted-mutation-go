@@ -93,7 +93,7 @@ func (s *session) comparisonEnabled(kind string) bool {
 func (s *session) preview(report *Report) {
 	report.Evaluation = "listed"
 	for _, site := range s.sites {
-		if site.String {
+		if site.String || site.Arith {
 			continue
 		}
 		for _, candidate := range analysis.PreviewSite(site.Op, site.Domain, site.Margin, site.Float, !s.cfg.Conventional) {

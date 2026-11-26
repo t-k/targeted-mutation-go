@@ -1,18 +1,24 @@
 
 func PROBEArith[T PROBEInteger](site int, origOp uint64, left, right T) T {
-	orig := PROBEApplyArith(origOp, left, right)
 	state := PROBEGetState()
 	if state.slots == nil || site < 0 || site*5+5 > len(state.slots) {
-		return orig
+		return PROBEApplyArith(origOp, left, right)
 	}
 	if state.site >= 0 {
 		if state.site != site {
-			return orig
+			return PROBEApplyArith(origOp, left, right)
 		}
-		if (state.mask == 4 || state.mask == 5) && right == 0 {
+		origPanics := (origOp == 4 || origOp == 5) && right == 0
+		mutPanics := (state.mask == 4 || state.mask == 5) && right == 0
+		if origPanics != mutPanics {
 			PROBERecord(&state.slots[site*5], 24)
 			return PROBEApplyArith(state.mask, left, right)
 		}
+		if origPanics && mutPanics {
+			PROBERecord(&state.slots[site*5], 8)
+			return PROBEApplyArith(state.mask, left, right)
+		}
+		orig := PROBEApplyArith(origOp, left, right)
 		mut := PROBEApplyArith(state.mask, left, right)
 		flags := uint64(8)
 		if mut != orig {
@@ -22,7 +28,7 @@ func PROBEArith[T PROBEInteger](site int, origOp uint64, left, right T) T {
 		return mut
 	}
 	PROBERecord(&state.slots[site*5], 1)
-	return orig
+	return PROBEApplyArith(origOp, left, right)
 }
 
 func PROBEApplyArith[T PROBEInteger](op uint64, left, right T) T {

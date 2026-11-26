@@ -120,11 +120,6 @@ func (s *session) workerEnv(overrides ...string) []string {
 	return cleanEnv(overrides...)
 }
 
-func (s *session) binaryWorkerEnv(trace, mutation string) []string {
-	return s.workerEnv("PATH="+filepath.Join(s.env.GOROOT, "bin")+string(os.PathListSeparator)+os.Getenv("PATH"),
-		"TMT_GO_TRACE="+trace, "TMT_GO_MUTATION="+mutation)
-}
-
 func binaryEnv(env goEnvironment, trace, mutation string) []string {
 	return cleanEnv("PATH="+filepath.Join(env.GOROOT, "bin")+string(os.PathListSeparator)+os.Getenv("PATH"),
 		"TMT_GO_TRACE="+trace, "TMT_GO_MUTATION="+mutation)

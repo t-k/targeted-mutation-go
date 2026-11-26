@@ -99,9 +99,6 @@ type session struct {
 	virtualDirs  map[string]string
 	testedDeps   map[string]bool
 	workerProcs  int
-	coverProfile string
-	coverPkg     string
-	coverage     *coverageMap
 }
 
 func Run(ctx context.Context, cfg Config) (Report, error) {
@@ -257,31 +254,9 @@ func Run(ctx context.Context, cfg Config) (Report, error) {
 	if !explicitTimeout {
 		baselineConfig.cfg.Timeout = min(s.cfg.BuildTimeout, 2*time.Minute)
 	}
-	if s.cfg.Full && !s.cfg.SourceOnly && !s.cfg.Conventional && !s.cfg.VerifySurvivors && len(s.virtualDirs) == 0 && len(s.sources) > 0 {
-		var coverPkgs []string
-		seenPkg := make(map[string]bool, len(s.packages))
-		for _, pkg := range s.packages {
-			if pkg.Path != "" && !seenPkg[pkg.Path] && len(pkg.Files) > 0 {
-				seenPkg[pkg.Path] = true
-				coverPkgs = append(coverPkgs, pkg.Path)
-			}
-		}
-		if len(coverPkgs) > 0 {
-			baselineConfig.coverProfile = filepath.Join(s.scratch, "baseline.cover")
-			baselineConfig.coverPkg = strings.Join(coverPkgs, ",")
-		}
-	}
 	base := baselineConfig.goTest(ctx, "", s.testPatterns()...)
 	if base.kind != "passed" {
 		return report, fmt.Errorf("ordinary Go test baseline %s:\n%s", base.kind, base.detail)
-	}
-	if baselineConfig.coverProfile != "" {
-		for _, pkg := range s.testPackages {
-			if base.packages[pkg.Path] == "pass" && !dirHasTestFiles(pkg.Dir) {
-				base.packages[pkg.Path] = "skip"
-			}
-		}
-		s.coverage = loadCoverageProfile(baselineConfig.coverProfile, s.packages)
 	}
 	if s.cfg.TestRun != "" && countRunEvents(base.inventory) == 0 {
 		return report, fmt.Errorf("no tests matched --test %q", s.cfg.TestRun)
@@ -403,10 +378,6 @@ func Run(ctx context.Context, cfg Config) (Report, error) {
 			res = s.cachedEdit(job.finding, site, reached[site.ID], func() sourceResult {
 				return s.runSourceComparison(ctx, job, reached[site.ID], base)
 			})
-		} else if job.edit != nil && isCoveragePrunableEdit(job.edit, job.source) && s.coverage.isUncovered(job.edit.File, job.source, job.edit) {
-			f := job.finding
-			f.Status, f.Evidence = "source-survivor", "observed"
-			res = sourceResult{jobResult: jobResult{finding: f}, skipped: 1}
 		} else {
 			res = s.cachedEdit(job.finding, nil, nil, func() sourceResult {
 				return sourceResult{jobResult: s.runSource(ctx, job, base)}
@@ -492,7 +463,7 @@ func Run(ctx context.Context, cfg Config) (Report, error) {
 	sourceRecheckProgress.stop()
 	if cfg.Audit != 0 {
 		beforeAuditLen := len(report.Findings)
-		if err := s.auditProbes(ctx, &report, probeJobs, results, base); err != nil {
+		if err := s.auditProbes(ctx, &report, probeJobs, results, sourceResults, base); err != nil {
 			return report, err
 		}
 		for _, added := range report.Findings[beforeAuditLen:] {
@@ -792,7 +763,7 @@ func (s *session) runBinaryOptions(ctx context.Context, bin *consumer, trace, mu
 	if pattern != "" {
 		args = append(args, "-test.run="+pattern)
 	}
-	return runCommand(ctx, s.cfg.Timeout+2*time.Second, bin.dir, s.binaryWorkerEnv(trace, mutation), bin.binary, args...)
+	return runCommand(ctx, s.cfg.Timeout+2*time.Second, bin.dir, binaryEnv(s.env, trace, mutation), bin.binary, args...)
 }
 
 func (s *session) buildFlags() []string {
@@ -826,9 +797,6 @@ func (s *session) goTestCommand(ctx context.Context, overlay string, failfast bo
 	if s.cfg.TestRun != "" {
 		args = append(args, "-run=" + s.cfg.TestRun)
 	}
-	if s.coverProfile != "" && s.coverPkg != "" {
-		args = append(args, "-coverprofile="+s.coverProfile, "-coverpkg="+s.coverPkg)
-	}
 	if overlay != "" {
 		// The ordinary baseline has already passed vet. A source mutation can
 		// be executable Go even when a static quality check rejects it.
@@ -836,7 +804,7 @@ func (s *session) goTestCommand(ctx context.Context, overlay string, failfast bo
 	}
 	args = append(args, s.buildFlags()...)
 	args = append(args, patterns...)
-	return runCommand(ctx, s.cfg.BuildTimeout, s.cfg.Dir, s.workerEnv(), "go", args...)
+	return runCommand(ctx, s.cfg.BuildTimeout, s.cfg.Dir, cleanEnv(), "go", args...)
 }
 
 func (s *session) reachedConsumers() [][]*consumer {
