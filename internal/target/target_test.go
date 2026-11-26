@@ -2,6 +2,9 @@ package target
 
 import (
 	"context"
+	"fmt"
+	"go/parser"
+	"go/token"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -12,6 +15,177 @@ import (
 
 	"github.com/t-k/targeted-mutation-go/internal/analysis"
 )
+
+func TestProbePreservesBoundaryAfterKeyword(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "go.mod", "module example.org/tight\n\ngo 1.26.0\n")
+	write(t, dir, "tight.go", `package tight
+func Rune(x rune) bool { return'a' < x }
+func String(x string) bool { if"a" < x { return false }; return true }
+`)
+	pkg, err := Discover(context.Background(), dir, []string{"."}, "", nil, Discovery{Full: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	file := pkg[0].Files[0]
+	if len(file.Sites) != 2 {
+		t.Fatalf("wanted both comparison sites, got %d", len(file.Sites))
+	}
+	rewritten := Rewrite(file, pkg[0].Prefix)
+	if _, err := parser.ParseFile(token.NewFileSet(), file.Path, rewritten, 0); err != nil {
+		t.Fatalf("rewritten source lost a token boundary: %v\n%s", err, rewritten)
+	}
+}
+
+func TestIntegerStepProbePICT(t *testing.T) {
+	data, err := os.ReadFile("../../verification/pict/literal-probe.tsv")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows := strings.Split(strings.TrimSpace(string(data)), "\n")[1:]
+	dir := t.TempDir()
+	write(t, dir, "go.mod", "module example.org/pivots\n\ngo 1.26.0\n")
+	var source strings.Builder
+	source.WriteString("package pivots\ntype Amount int8\n")
+	type example struct {
+		row   string
+		from  int
+		to    int
+		op    analysis.Operator
+		valid bool
+	}
+	var cases []example
+	for i, row := range rows {
+		fields := strings.Fields(row)
+		typ := map[string]string{"signed": "int8", "unsigned": "uint8", "named": "Amount"}[fields[1]]
+		limit := 127
+		if typ == "uint8" {
+			limit = 255
+		}
+		delta := 1
+		if fields[2] == "down" {
+			delta = -1
+		}
+		from, op := 4, analysis.GE
+		expr := "x >= 4"
+		switch fields[0] {
+		case "left":
+			expr, op = "4 >= x", analysis.LE
+		case "parentheses":
+			expr = "x >= ((4))"
+		case "unary":
+			expr = "x >= -4"
+		case "maximum":
+			from, expr = limit, fmt.Sprintf("x >= %d", limit)
+		case "minimum":
+			from, expr = 0, "x >= 0"
+		}
+		to := from + delta
+		valid := fields[0] != "unary" && to <= limit && (typ != "uint8" || to >= 0)
+		cases = append(cases, example{row, from, to, op, valid})
+		fmt.Fprintf(&source, "func F%d(x %s) bool { return %s }\n", i, typ, expr)
+	}
+	write(t, dir, "pivots.go", source.String())
+	pkg, err := Discover(context.Background(), dir, []string{"."}, "", nil, Discovery{Full: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, want := range cases {
+		var got Edit
+		for _, edit := range pkg[0].Files[0].Edits {
+			if edit.Line == i+3 && edit.Kind == "integer-step" && edit.Before == strconv.Itoa(want.from) &&
+				strings.Trim(edit.After, "()") == strconv.Itoa(want.to) {
+				got = edit
+				break
+			}
+		}
+		if got.Kind == "" || (got.Site != nil) != want.valid {
+			t.Errorf("%s: unexpected routing: %+v", want.row, got)
+			continue
+		}
+		if want.valid {
+			pivot := uint64(want.to)
+			if got.Site.Domain.Signed {
+				pivot = analysis.RankSigned(int64(want.to))
+			}
+			if got.Pivot != pivot || got.Operator != want.op || got.Shift != want.to-want.from {
+				t.Errorf("%s: unexpected selector: %+v", want.row, got)
+			}
+		}
+	}
+}
+
+func TestForcedComparisonProbePICT(t *testing.T) {
+	data, err := os.ReadFile("../../verification/pict/forced-comparison.tsv")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows := strings.Split(strings.TrimSpace(string(data)), "\n")[1:]
+	dir := t.TempDir()
+	write(t, dir, "go.mod", "module example.org/force\n\ngo 1.26.0\n")
+	var source strings.Builder
+	source.WriteString("package force\nvar true = false\n")
+	for i, row := range rows {
+		fields := strings.Fields(row)
+		setup := ""
+		expr := map[string]string{"parameters": "x > y", "literal": "x > 4", "index": "xs[x] > y",
+			"local": "n > y", "division": "x / y > 0"}[fields[1]]
+		if fields[1] == "local" {
+			setup = "n := x; "
+		}
+		body := "return " + expr
+		switch fields[0] {
+		case "if":
+			body = "if " + expr + " { return true }; return false"
+		case "for":
+			body = "for " + expr + " { return true }; return false"
+		case "tight-return":
+			body = "return(" + expr + ")"
+		case "tight-if":
+			body = "if(" + expr + ") { return true }; return false"
+		}
+		fmt.Fprintf(&source, "func F%d(x, y int, xs []int) bool { %s%s }\n", i, setup, body)
+	}
+	write(t, dir, "force.go", source.String())
+	pkg, err := Discover(context.Background(), dir, []string{"."}, "", nil, Discovery{Full: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, row := range rows {
+		fields := strings.Fields(row)
+		kind, change, mask := "condition-constant", "false", uint64(0)
+		isReturn := strings.HasSuffix(fields[0], "return")
+		if isReturn {
+			kind = "return-boolean"
+		}
+		if fields[2] == "true" {
+			change, mask = "(0 == 0)", 7
+		}
+		valid := fields[1] == "parameters" || fields[1] == "literal"
+		if strings.HasPrefix(fields[0], "tight-") && fields[2] == "false" {
+			valid = false
+		}
+		var forced, negated *Edit
+		for j := range pkg[0].Files[0].Edits {
+			edit := &pkg[0].Files[0].Edits[j]
+			if edit.Line != i+3 {
+				continue
+			}
+			if edit.Kind == kind && edit.After == change {
+				forced = edit
+			}
+			if edit.Kind == "condition-negation" {
+				negated = edit
+			}
+		}
+		if forced == nil || (forced.Site != nil) != valid || valid && forced.Operator.Mask() != mask {
+			t.Errorf("%s: unexpected constant routing %+v", row, forced)
+		}
+		if !isReturn && (negated == nil || negated.Site == nil || negated.Operator != analysis.LE) {
+			t.Errorf("%s: unexpected negation routing %+v", row, negated)
+		}
+	}
+}
 
 func TestTypedDiscoveryAndRewrite(t *testing.T) {
 	dir := t.TempDir()

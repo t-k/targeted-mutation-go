@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/t-k/targeted-mutation-go/internal/analysis"
 	"golang.org/x/tools/go/packages"
 )
 
@@ -38,14 +39,19 @@ type sourceEdits struct {
 	pkg       *packages.Package
 	scope     Scope
 	probed    map[int]*Site
+	pivots    map[int]*Site
 	added     map[editKey]bool
 	rawSource bool
 }
 
 func discoverSourceEdits(file *File, tree *ast.File, positions *token.File, pkg *packages.Package, scope Scope, rawSource bool) {
-	edits := sourceEdits{file: file, positions: positions, pkg: pkg, scope: scope, probed: make(map[int]*Site, len(file.Sites)), added: make(map[editKey]bool), rawSource: rawSource}
+	edits := sourceEdits{file: file, positions: positions, pkg: pkg, scope: scope,
+		probed: make(map[int]*Site, len(file.Sites)), pivots: make(map[int]*Site), added: make(map[editKey]bool), rawSource: rawSource}
 	for _, site := range file.Sites {
 		edits.probed[site.OperatorAt] = site
+		if site.LiteralAt != 0 {
+			edits.pivots[site.LiteralAt] = site
+		}
 	}
 	ast.PreorderStack(tree, nil, edits.visit)
 }
@@ -155,8 +161,8 @@ func (e *sourceEdits) add(start, end, anchor token.Pos, kind, replacement string
 	return &e.file.Edits[len(e.file.Edits)-1]
 }
 
-func (e *sourceEdits) replace(node ast.Node, kind, replacement string) {
-	e.add(node.Pos(), node.End(), node.Pos(), kind, replacement)
+func (e *sourceEdits) replace(node ast.Node, kind, replacement string) *Edit {
+	return e.add(node.Pos(), node.End(), node.Pos(), kind, replacement)
 }
 
 func (e *sourceEdits) operator(pos token.Pos, op, replacement token.Token) *Edit {
@@ -306,7 +312,15 @@ func (e *sourceEdits) literal(n *ast.BasicLit) {
 				// A preceding unary minus must not form a decrement token.
 				result = "(" + result + ")"
 			}
-			e.replace(n, "integer-step", result)
+			edit := e.add(n.Pos(), n.End(), n.Pos(), "integer-step", result)
+			if site := e.pivots[e.positions.Offset(n.Pos())]; edit != nil && site != nil {
+				domain := site.Domain
+				// Route only replacements representable in the comparison's operand type.
+				if delta < 0 && domain.Pivot > domain.Low || delta > 0 && domain.Pivot < domain.High {
+					edit.Site, edit.Operator, edit.Shift = site, site.Op, int(delta)
+					edit.Pivot = domain.Pivot + uint64(delta)
+				}
+			}
 		}
 	case token.FLOAT:
 		value, err := strconv.ParseFloat(n.Value, 64)
@@ -382,7 +396,11 @@ func (e *sourceEdits) condition(expr ast.Expr) {
 	}
 	e.boolean(expr, false, "condition-constant")
 	e.boolean(expr, true, "condition-constant")
-	e.replace(expr, "condition-negation", "!("+e.text(expr)+")")
+	if edit := e.replace(expr, "condition-negation", "!("+e.text(expr)+")"); edit != nil {
+		if site := e.comparison(expr); site != nil {
+			edit.Site, edit.Operator = site, site.Op.Negate()
+		}
+	}
 }
 
 func (e *sourceEdits) boolean(node ast.Node, value bool, kind string) {
@@ -400,7 +418,31 @@ func (e *sourceEdits) boolean(node ast.Node, value bool, kind string) {
 			return
 		}
 	}
-	e.replace(node, kind, text)
+	edit := e.replace(node, kind, text)
+	if expr, ok := node.(ast.Expr); edit != nil && ok && (kind == "condition-constant" || kind == "return-boolean") {
+		// These source edits drop both operands. A parameter or literal read cannot panic
+		// and using only those operands avoids introducing an unused local or import.
+		if site := e.comparison(expr); site != nil && site.CanDropOperands && e.separatesBoolean(edit) {
+			edit.Site = site
+			edit.Operator = analysis.AlwaysFalse
+			if value {
+				edit.Operator = analysis.AlwaysTrue
+			}
+		}
+	}
+}
+
+func (e *sourceEdits) separatesBoolean(edit *Edit) bool {
+	// A parenthesized condition or return value can directly follow its keyword.
+	// A bare boolean identifier would instead join with that keyword.
+	return edit.After[0] == '(' || !followsIdentifierByte(e.file.Data, edit.Start)
+}
+
+func (e *sourceEdits) comparison(expr ast.Expr) *Site {
+	if comparison, ok := ast.Unparen(expr).(*ast.BinaryExpr); ok {
+		return e.probed[e.positions.Offset(comparison.OpPos)]
+	}
+	return nil
 }
 
 func (e *sourceEdits) builtin(id *ast.Ident, name string) bool {

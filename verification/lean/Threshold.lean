@@ -16,6 +16,11 @@ theorem le_raise (x t : Int) : (x ≤ t ↔ ¬ (x ≤ t+1)) ↔ x = t+1 := by om
 theorem lt_lower (x t : Int) : (x < t ↔ ¬ (x < t-1)) ↔ x = t-1 := by omega
 theorem lt_raise (x t : Int) : (x < t ↔ ¬ (x < t+1)) ↔ x = t := by omega
 
+theorem eq_lower (x t : Int) : (x = t ↔ ¬ (x = t-1)) ↔ x = t ∨ x = t-1 := by omega
+theorem eq_raise (x t : Int) : (x = t ↔ ¬ (x = t+1)) ↔ x = t ∨ x = t+1 := by omega
+theorem ne_lower (x t : Int) : (x ≠ t ↔ ¬ (x ≠ t-1)) ↔ x = t ∨ x = t-1 := by omega
+theorem ne_raise (x t : Int) : (x ≠ t ↔ ¬ (x ≠ t+1)) ↔ x = t ∨ x = t+1 := by omega
+
 theorem below_extremum (observed : Int → Prop) (boundary nearest : Int)
     (found : observed nearest) (lower : nearest < boundary)
     (maximal : ∀ x, observed x → x < boundary → x ≤ nearest) :
@@ -76,5 +81,11 @@ theorem swap_operands_preserves_agreement (seen original mutant : BitVec 3) :
       swapOperands seen &&& (swapOperands original ^^^ swapOperands mutant) = 0#3 := by
   unfold swapOperands
   bv_decide
+
+theorem compares_as_false (seen original : BitVec 3) :
+    seen &&& (original ^^^ 0#3) = 0#3 ↔ seen &&& original = 0#3 := by bv_decide
+
+theorem compares_as_true (seen original : BitVec 3) :
+    seen &&& (original ^^^ 7#3) = 0#3 ↔ seen &&& original = seen := by bv_decide
 
 end TargetedMutation

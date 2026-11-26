@@ -72,7 +72,16 @@ func checkPlan(t *testing.T, op Operator, low, high, pivot uint64, samples []uin
 		summary.Observe(value, pivot)
 	}
 	plan := Plan(op, &Domain{Low: low, High: high, Pivot: pivot}, summary, true)
-	for _, candidate := range plan {
+	candidates := append([]Candidate(nil), plan...)
+	if pivot > low {
+		at := pivot - 1
+		candidates = append(candidates, Candidate{Op: op, Pivot: at, Shift: -1, Witness: &at})
+	}
+	if pivot < high {
+		at := pivot + 1
+		candidates = append(candidates, Candidate{Op: op, Pivot: at, Shift: 1, Witness: &at})
+	}
+	for _, candidate := range candidates {
 		changes := false
 		for _, value := range samples {
 			changes = changes || evaluateOracle(op, value, pivot) != evaluateOracle(candidate.Op, value, candidate.Pivot)
@@ -80,7 +89,7 @@ func checkPlan(t *testing.T, op Operator, low, high, pivot uint64, samples []uin
 		if got := candidate.Infects(op, summary); got != changes {
 			t.Fatalf("%v pivot %d samples %v: %+v infection=%v want %v", op, pivot, samples, candidate, got, changes)
 		}
-		if candidate.Witness != nil {
+		if candidate.Kind != "" && candidate.Witness != nil {
 			value := *candidate.Witness
 			if value < low || value > high || evaluateOracle(op, value, pivot) == evaluateOracle(candidate.Op, value, candidate.Pivot) {
 				t.Fatalf("invalid witness %d for %+v", value, candidate)

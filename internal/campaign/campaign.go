@@ -380,9 +380,6 @@ func (s *session) reachedConsumers() [][]*consumer {
 func (s *session) plan(report *Report, consumers [][]*consumer) []probeJob {
 	var jobs []probeJob
 	for _, site := range s.sites {
-		if site.String {
-			continue
-		}
 		var seen analysis.Summary
 		reached := consumers[site.ID]
 		for _, bin := range reached {
@@ -394,6 +391,9 @@ func (s *session) plan(report *Report, consumers [][]*consumer) []probeJob {
 				report.Findings = append(report.Findings, Finding{Status: "unreached",
 					File: s.rel(site.File), Line: site.Line, Column: site.Column, Expression: site.Expression})
 			}
+			continue
+		}
+		if site.String {
 			continue
 		}
 		for _, candidate := range analysis.Plan(site.Op, site.Domain, seen, !s.cfg.Conventional) {

@@ -14,6 +14,7 @@ mutants = {
     "operator mask": ("c.Op.Mask()^original.Mask()", "c.Op.Mask()&original.Mask()"),
     "signed rank": ("uint64(value) ^ (1 << 63)", "uint64(value)"),
     "inclusive threshold": ("low = seen.Below + 1", "low = seen.Below"),
+    "adjacent equality": ("if checksNeighbor && seen.Flags&Equal != 0 {", "if false {"),
     "negation catalog": (
         'candidates = append(candidates, Candidate{Kind: "negation", Op: op.Negate(), Pivot: pivot})',
         "",

@@ -1,0 +1,4 @@
+Shape: right, left, parentheses, unary, maximum, minimum
+Type: signed, unsigned, named
+Direction: down, up
+IF [Shape] = "unary" THEN [Type] <> "unsigned";

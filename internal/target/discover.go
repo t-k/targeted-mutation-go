@@ -54,11 +54,13 @@ type Site struct {
 	File                    string
 	Line, Column            int
 	Start, End, OperatorAt  int
+	LiteralAt               int
 	Left, Right, Expression string
 	Op                      analysis.Operator
 	Domain                  *analysis.Domain
 	Callable                string
 	Reversed, String        bool
+	CanDropOperands         bool
 }
 
 type Edit struct {
@@ -69,6 +71,8 @@ type Edit struct {
 	MissingReturn       bool
 	Site                *Site
 	Operator            analysis.Operator
+	Pivot               uint64
+	Shift               int
 }
 
 type Discovery struct {
@@ -146,7 +150,7 @@ func Discover(ctx context.Context, dir string, patterns []string, tags string, s
 			data := snapshot.([]byte)
 			file := &File{Path: path, Data: data}
 			if portable {
-				findSites(file, syntax, astFile, pkg, scope, options.Full && pkg.Types.Scope().Lookup("string") == nil)
+				findSites(file, syntax, astFile, pkg, scope, options.Full)
 			}
 			if options.Full || options.SourceOnly {
 				discoverSourceEdits(file, syntax, astFile, pkg, scope, cgoWithoutTypes)
@@ -189,20 +193,21 @@ func versionSupportsProbes(v string) bool {
 	return major > 1 || major == 1 && minor >= 18
 }
 
-func findSites(file *File, tree *ast.File, positions *token.File, pkg *packages.Package, scope Scope, stringsOK bool) {
+func findSites(file *File, tree *ast.File, positions *token.File, pkg *packages.Package, scope Scope, full bool) {
 	text := func(node ast.Node) string {
 		return string(file.Data[positions.Offset(node.Pos()):positions.Offset(node.End())])
 	}
+	stringsOK := full && pkg.Types.Scope().Lookup("string") == nil
 	for _, decl := range tree.Decls {
 		fn, ok := decl.(*ast.FuncDecl)
 		if !ok || fn.Body == nil || hasCompilerDirective(fn) {
 			continue
 		}
-		findFunctionSites(file, fn, positions, pkg, scope, stringsOK, text)
+		findFunctionSites(file, fn, positions, pkg, scope, full, stringsOK, text)
 	}
 }
 
-func findFunctionSites(file *File, fn *ast.FuncDecl, positions *token.File, pkg *packages.Package, scope Scope, stringsOK bool, text func(ast.Node) string) {
+func findFunctionSites(file *File, fn *ast.FuncDecl, positions *token.File, pkg *packages.Package, scope Scope, full, stringsOK bool, text func(ast.Node) string) {
 	var stack []ast.Node
 	safety := make(map[ast.Stmt]bool)
 	ast.Inspect(fn.Body, func(node ast.Node) (visit bool) {
@@ -235,6 +240,16 @@ func findFunctionSites(file *File, fn *ast.FuncDecl, positions *token.File, pkg 
 				}
 				site.String = stringsOK && stringOperands(expr, pkg.TypesInfo)
 				if site.String || makeIntegerSite(site, expr, fn, pkg) {
+					if full && site.Domain != nil {
+						constantOperand := expr.Y
+						if site.Reversed {
+							constantOperand = expr.X
+						}
+						if literal, ok := ast.Unparen(constantOperand).(*ast.BasicLit); ok && literal.Kind == token.INT {
+							site.LiteralAt = positions.Offset(literal.Pos())
+						}
+					}
+					site.CanDropOperands = full && parameterOrLiteral(expr.X, fn, pkg.TypesInfo) && parameterOrLiteral(expr.Y, fn, pkg.TypesInfo)
 					file.Sites = append(file.Sites, site)
 					return false
 				}
@@ -242,6 +257,25 @@ func findFunctionSites(file *File, fn *ast.FuncDecl, positions *token.File, pkg 
 		}
 		return true
 	})
+}
+
+func parameterOrLiteral(expr ast.Expr, fn *ast.FuncDecl, info *types.Info) bool {
+	switch operand := ast.Unparen(expr).(type) {
+	case *ast.BasicLit:
+		return true
+	case *ast.Ident:
+		object := info.Uses[operand]
+		if object != nil {
+			for _, field := range fn.Type.Params.List {
+				for _, parameter := range field.Names {
+					if object == info.Defs[parameter] {
+						return true
+					}
+				}
+			}
+		}
+	}
+	return false
 }
 
 func safeStatement(ancestors []ast.Node, info *types.Info, cache map[ast.Stmt]bool) bool {

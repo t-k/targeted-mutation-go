@@ -102,6 +102,7 @@ func TestFullComparisonRoutesMatchSourceSemantics(t *testing.T) {
 			type expectation struct {
 				row, original, mutant, status, evidence string
 				line                                    int
+				unreached                               bool
 			}
 			var cases []expectation
 			for _, row := range rows {
@@ -141,6 +142,7 @@ func TestFullComparisonRoutesMatchSourceSemantics(t *testing.T) {
 					}
 				}
 				if reusable && mode != "source-only" {
+					expected.unreached = fields[1] == "unreached"
 					switch {
 					case fields[1] == "unreached" && mode == "verified":
 					case expected.status == "killed" || mode == "verified":
@@ -155,17 +157,21 @@ func TestFullComparisonRoutesMatchSourceSemantics(t *testing.T) {
 			fixture(t, dir, "compare.go", code.String())
 			fixture(t, dir, "compare_test.go", tests.String())
 			report, err := Run(context.Background(), Config{Dir: dir, Jobs: 4, Full: mode != "source-only",
-				SourceOnly: mode == "source-only", VerifySurvivors: mode == "verified", KilledFindings: true})
+				SourceOnly: mode == "source-only", VerifySurvivors: mode == "verified", KilledFindings: true, ShowUnreached: true})
 			if err != nil {
 				t.Fatal(err)
 			}
 			for _, want := range cases {
 				var got Finding
+				unreached := false
 				for _, f := range report.Findings {
+					unreached = unreached || f.Line == want.line && f.Status == "unreached"
 					if f.Line == want.line && f.Rule == "source-operator" && f.Expression == want.original && f.Mutation == want.mutant {
 						got = f
-						break
 					}
+				}
+				if unreached != want.unreached {
+					t.Errorf("%s: unreachable finding is %t, want %t", want.row, unreached, want.unreached)
 				}
 				if got.Status != want.status || got.Evidence != want.evidence {
 					t.Errorf("%s: got %+v, want %s with %s", want.row, got, want.status, want.evidence)

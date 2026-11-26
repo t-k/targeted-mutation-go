@@ -10,6 +10,8 @@ const (
 	GE
 	EQ
 	NE
+	AlwaysFalse
+	AlwaysTrue
 )
 
 const (
@@ -19,23 +21,23 @@ const (
 )
 
 func (op Operator) String() string {
-	return [...]string{"", "<", "<=", ">", ">=", "==", "!="}[op]
+	return [...]string{"", "<", "<=", ">", ">=", "==", "!=", "false", "true"}[op]
 }
 
 func (op Operator) Mask() uint64 {
-	return [...]uint64{0, Less, Less | Equal, Greater, Greater | Equal, Equal, Less | Greater}[op]
+	return [...]uint64{0, Less, Less | Equal, Greater, Greater | Equal, Equal, Less | Greater, 0, Less | Equal | Greater}[op]
 }
 
 func (op Operator) Negate() Operator {
-	return [...]Operator{0, GE, GT, LE, LT, NE, EQ}[op]
+	return [...]Operator{0, GE, GT, LE, LT, NE, EQ, AlwaysTrue, AlwaysFalse}[op]
 }
 
 func (op Operator) Reverse() Operator {
-	return [...]Operator{0, GT, GE, LT, LE, EQ, NE}[op]
+	return [...]Operator{0, GT, GE, LT, LE, EQ, NE, AlwaysFalse, AlwaysTrue}[op]
 }
 
 func (op Operator) Boundary() Operator {
-	return [...]Operator{0, LE, LT, GE, GT, 0, 0}[op]
+	return [...]Operator{0, LE, LT, GE, GT, 0, 0, 0, 0}[op]
 }
 
 func RankSigned(value int64) uint64 {
@@ -93,13 +95,17 @@ func (c Candidate) Infects(original Operator, seen Summary) bool {
 	if c.Shift == 0 {
 		return seen.Flags&(c.Op.Mask()^original.Mask()) != 0
 	}
-	if (original == GE || original == LT) == (c.Shift > 0) {
+	checksNeighbor := original == EQ || original == NE
+	if !checksNeighbor && (original == GE || original == LT) == (c.Shift > 0) {
 		return seen.Flags&Equal != 0
 	}
-	if c.Shift < 0 {
-		return seen.Flags&Less != 0 && seen.Below == *c.Witness
+	if checksNeighbor && seen.Flags&Equal != 0 {
+		return true
 	}
-	return seen.Flags&Greater != 0 && seen.Above == *c.Witness
+	if c.Shift < 0 {
+		return seen.Flags&Less != 0 && seen.Below == c.Pivot
+	}
+	return seen.Flags&Greater != 0 && seen.Above == c.Pivot
 }
 
 func Plan(op Operator, domain *Domain, seen Summary, targeted bool) []Candidate {

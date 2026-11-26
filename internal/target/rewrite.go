@@ -14,6 +14,9 @@ func Rewrite(file *File, prefix string) []byte {
 	previous := 0
 	for _, site := range sites {
 		result.Write(file.Data[previous:site.Start])
+		if followsIdentifierByte(file.Data, site.Start) {
+			result.WriteByte(' ')
+		}
 		compare := "Compare"
 		if site.String {
 			compare = "CompareString"
@@ -29,4 +32,12 @@ func Rewrite(file *File, prefix string) []byte {
 	}
 	result.Write(file.Data[previous:])
 	return result.Bytes()
+}
+
+func followsIdentifierByte(data []byte, start int) bool {
+	if start == 0 {
+		return false
+	}
+	prev := data[start-1]
+	return 'a' <= prev && prev <= 'z' || 'A' <= prev && prev <= 'Z' || '0' <= prev && prev <= '9' || prev == '_' || prev >= 0x80
 }

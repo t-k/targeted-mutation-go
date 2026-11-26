@@ -1,0 +1,10 @@
+Context	Operands	Force
+return	literal	true
+if	parameters	false
+for	parameters	true
+return	index	false
+if	local	true
+return	division	true
+tight-return	parameters	false
+tight-if	literal	false
+tight-return	literal	true

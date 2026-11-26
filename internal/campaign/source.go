@@ -24,7 +24,7 @@ type sourceResult struct {
 
 func (s *session) runSourceComparison(ctx context.Context, job sourceJob, reached []*consumer, baseline commandResult) sourceResult {
 	site := job.edit.Site
-	candidate := analysis.Candidate{Op: job.edit.Operator}
+	candidate := analysis.Candidate{Op: job.edit.Operator, Pivot: job.edit.Pivot, Shift: job.edit.Shift}
 	probe := probeJob{site: site, candidate: candidate, finding: job.finding}
 	for _, bin := range reached {
 		if candidate.Infects(site.Op, bin.seen[site.ID]) {

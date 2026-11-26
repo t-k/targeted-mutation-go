@@ -76,7 +76,7 @@ The probes support integer ordering and equality, including named integer types 
 
 Use explicit module package patterns at a workspace root that has no Go module, for example `./app/... ./lib/...`. Only compatible build flags are accepted in `GOFLAGS`. Pass test timeouts and build tags through the CLI.
 
-`--full` reuses the comparison binaries for eligible source operator replacements. The JSON `evidence` field records `observed` for agreement on the recorded comparisons, `replayed` for a binary replay, `source-replay` for a separate source overlay, and `static` for an edit that empties a function body with required results. An unconfirmed comparison replay falls back to its source overlay. `--source-only` builds every candidate independently.
+`--full` reuses the comparison binaries for eligible operator replacements, adjacent integer literal changes, and boolean replacements of comparison expressions. The JSON `evidence` field records `observed` for agreement on the recorded comparisons, `replayed` for a binary replay, `source-replay` for a separate source overlay, and `static` for an edit that empties a function body with required results. An unconfirmed comparison replay falls back to its source overlay. `--source-only` builds every candidate independently.
 
 Source replay shares original snapshots and creates each edited file inside a worker. It can retry once when the edit leaves an unused import or local variable. The retry preserves import initialization and the local's initializer. The ordinary baseline runs Go vet. Source discovery can include original Go files in cgo packages and uses the compiler to validate edits that require cgo.
 

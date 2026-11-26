@@ -1,0 +1,7 @@
+Shape	Type	Direction
+right	signed	down
+left	named	up
+parentheses	unsigned	down
+unary	signed	down
+maximum	unsigned	up
+minimum	unsigned	down
