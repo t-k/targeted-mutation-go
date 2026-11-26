@@ -1,0 +1,133 @@
+package PROBE_PACKAGE
+
+import (
+	"os"
+	"strconv"
+	"strings"
+	"sync/atomic"
+	"syscall"
+	"unsafe"
+)
+
+type PROBEInteger interface {
+	~int | ~int8 | ~int16 | ~int32 | ~int64 | ~uint | ~uint8 | ~uint16 | ~uint32 | ~uint64 | ~uintptr
+}
+
+type PROBEState struct {
+	slots []uint64
+	site int
+	mask uint64
+	pivot uint64
+	shift bool
+}
+
+var PROBEStateValue = PROBEOpen()
+
+func PROBEOpen() PROBEState {
+	state := PROBEState{site: -1}
+	path := os.Getenv("TMT_GO_TRACE")
+	if path == "" {
+		return state
+	}
+	f, err := os.OpenFile(path, os.O_RDWR, 0)
+	if err != nil {
+		panic(err)
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		panic(err)
+	}
+	data, err := syscall.Mmap(int(f.Fd()), 0, int(info.Size()), syscall.PROT_READ|syscall.PROT_WRITE, syscall.MAP_SHARED)
+	if err != nil {
+		panic(err)
+	}
+	state.slots = unsafe.Slice((*uint64)(unsafe.Pointer(&data[0])), len(data)/8)
+	if mode := os.Getenv("TMT_GO_MUTATION"); mode != "" {
+		fields := strings.Split(mode, ":")
+		if len(fields) != 4 {
+			panic("invalid mutation selector")
+		}
+		state.site, err = strconv.Atoi(fields[0])
+		if err != nil {
+			panic(err)
+		}
+		state.mask, err = strconv.ParseUint(fields[1], 10, 64)
+		if err != nil {
+			panic(err)
+		}
+		state.pivot, err = strconv.ParseUint(fields[2], 10, 64)
+		if err != nil {
+			panic(err)
+		}
+		state.shift, err = strconv.ParseBool(fields[3])
+		if err != nil {
+			panic(err)
+		}
+	}
+	return state
+}
+
+func PROBERank[T PROBEInteger](value T) uint64 {
+	var zero T
+	if ^zero < zero {
+		return uint64(value) ^ (1 << 63)
+	}
+	return uint64(value)
+}
+
+func PROBEOrder[T PROBEInteger](left, right T) uint64 {
+	if left < right {
+		return 1
+	}
+	if left > right {
+		return 4
+	}
+	return 2
+}
+
+func PROBECompare[T PROBEInteger](site int, mask uint64, left, right T) bool {
+	order := PROBEOrder(left, right)
+	state := &PROBEStateValue
+	if state.slots == nil {
+		return order&mask != 0
+	}
+	if state.site >= 0 {
+		if state.site != site {
+			return order&mask != 0
+		}
+		mutantOrder := order
+		if state.shift {
+			mutantOrder = PROBEOrder(PROBERank(left), state.pivot)
+		}
+		original, mutant := order&mask != 0, mutantOrder&state.mask != 0
+		flags := uint64(8)
+		if original != mutant {
+			flags |= 16
+		}
+		if word := &state.slots[site*3]; atomic.LoadUint64(word)&flags != flags {
+			atomic.OrUint64(word, flags)
+		}
+		return mutant
+	}
+	slot := state.slots[site*3 : site*3+3]
+	if order == 1 {
+		value := PROBERank(left)
+		for old := atomic.LoadUint64(&slot[1]); old < value; old = atomic.LoadUint64(&slot[1]) {
+			if atomic.CompareAndSwapUint64(&slot[1], old, value) {
+				break
+			}
+		}
+	} else if order == 4 {
+		value := ^PROBERank(left)
+		for old := atomic.LoadUint64(&slot[2]); old < value; old = atomic.LoadUint64(&slot[2]) {
+			if atomic.CompareAndSwapUint64(&slot[2], old, value) {
+				break
+			}
+		}
+	}
+	if atomic.LoadUint64(&slot[0])&order == 0 {
+		atomic.OrUint64(&slot[0], order)
+	}
+	return order&mask != 0
+}
