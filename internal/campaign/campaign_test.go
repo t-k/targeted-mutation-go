@@ -258,13 +258,16 @@ func TestFullRunsSourceMutationAfterRepairingUnusedDeclarations(t *testing.T) {
 	t.Setenv("TMPDIR", scratch)
 	fixture(t, dir, "go.mod", "module example.org/repair\n\ngo 1.26.0\n")
 	fixture(t, dir, "value.go", `package repair
-import "strings"
+import ("fmt"; "strings")
 func Local() string { value := "data"; return value }
 func Imported() string { return strings.TrimSpace(" valid ") }
+func Wrapped(err error) error { return fmt.Errorf("wrap: %w", err) }
 `)
 	fixture(t, dir, "value_test.go", `package repair
-import "testing"
+import ("errors"; "testing")
 func TestCalls(t *testing.T) {
+	err := errors.New("underlying")
+	if !errors.Is(Wrapped(err), err) { t.Fatal("error is not wrapped") }
 	if Local() != "data" || Imported() != "valid" { t.Fatal("wrong string") }
 }
 `)
@@ -273,12 +276,16 @@ func TestCalls(t *testing.T) {
 		t.Fatal(err)
 	}
 	killed := 0
+	formatMutationKilled := false
 	for _, f := range report.Findings {
 		if f.Rule == "return-zero" && f.Status == "killed" {
 			killed++
 		}
+		if f.Rule == "string-literal" && f.Expression == `"wrap: %w"` && f.Mutation == `""` && f.Status == "killed" {
+			formatMutationKilled = true
+		}
 	}
-	if killed != 2 || report.Incomplete != 0 {
+	if killed != 2 || !formatMutationKilled || report.Incomplete != 0 {
 		t.Fatalf("expected both returns to be retested and killed: %+v", report)
 	}
 }

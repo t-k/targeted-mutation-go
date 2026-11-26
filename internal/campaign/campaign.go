@@ -350,7 +350,9 @@ func (s *session) buildFlags() []string {
 func (s *session) goTest(ctx context.Context, overlay string, patterns ...string) commandResult {
 	args := []string{"test", "-json", "-count=1", "-timeout=" + s.cfg.Timeout.String(), "-p=" + strconv.Itoa(s.cfg.Jobs)}
 	if overlay != "" {
-		args = append(args, "-overlay="+overlay)
+		// The ordinary baseline has already passed vet. A source mutation can
+		// be executable Go even when a static quality check rejects it.
+		args = append(args, "-vet=off", "-overlay="+overlay)
 	}
 	args = append(args, s.buildFlags()...)
 	args = append(args, patterns...)
