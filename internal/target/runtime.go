@@ -14,11 +14,13 @@ var probeSource string
 var stringProbeSource string
 
 type Replacement struct {
-	Path      string
-	Line      int
-	EndLine   int
-	Data      []byte
-	Synthetic bool
+	Path        string
+	Line        int
+	EndLine     int
+	Column      int
+	Description string
+	Data        []byte
+	Synthetic   bool
 }
 
 func Runtime(pkg Package) []Replacement {

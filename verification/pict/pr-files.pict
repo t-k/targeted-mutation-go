@@ -1,0 +1,4 @@
+Change: modified, deleted, added, untracked, type-change, and, or, field, mixed, replacement
+Location: root, nested
+Layout: flat, multiline, comments
+IF [Change] IN {"modified", "deleted", "added", "untracked", "type-change"} THEN [Layout] = "flat";

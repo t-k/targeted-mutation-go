@@ -21,16 +21,10 @@ func gitScope(ctx context.Context, dir, revision string, undo bool) (target.Scop
 	if revision == "" {
 		return nil, nil, nil
 	}
-	rootText, err := git(ctx, dir, "rev-parse", "--show-toplevel")
+	root, commit, err := gitBase(ctx, dir, revision)
 	if err != nil {
 		return nil, nil, err
 	}
-	root := strings.TrimSuffix(string(rootText), "\n")
-	commitText, err := git(ctx, root, "rev-parse", "--verify", "--end-of-options", revision+"^{commit}")
-	if err != nil {
-		return nil, nil, err
-	}
-	commit := strings.TrimSpace(string(commitText))
 	tracked, err := git(ctx, root, "diff", "--no-renames", "--name-only", "--diff-filter=AMT", "-z", commit, "--")
 	if err != nil {
 		return nil, nil, err
@@ -64,6 +58,8 @@ func gitScope(ctx context.Context, dir, revision string, undo bool) (target.Scop
 		}
 		matches := hunkHeader.FindAllSubmatch(patch, -1)
 		var current, previous [][]byte
+		var parsed *prSource
+		var offsets []int
 		if undo && len(matches) > 0 && !bytes.Contains(patch, []byte("\n--- /dev/null\n")) {
 			before, err := git(ctx, root, "show", commit+":"+name)
 			if err != nil {
@@ -74,6 +70,11 @@ func gitScope(ctx context.Context, dir, revision string, undo bool) (target.Scop
 				return nil, nil, err
 			}
 			previous, current = sourceLines(before), sourceLines(after)
+			parsed = parsePRSource(path, after)
+			offsets = make([]int, len(current)+1)
+			for i, line := range current {
+				offsets[i+1] = offsets[i] + len(line)
+			}
 		}
 		for _, hunk := range matches {
 			oldStart, oldCount, newStart, newCount := number(hunk[1], 0), number(hunk[2], 1), number(hunk[3], 0), number(hunk[4], 1)
@@ -91,6 +92,7 @@ func gitScope(ctx context.Context, dir, revision string, undo bool) (target.Scop
 			data = append(data, bytes.Join(current[newOffset+newCount:], nil)...)
 			dir := filepath.Dir(path)
 			reverts[dir] = append(reverts[dir], target.Replacement{Path: path, Data: data, Line: line, EndLine: max(line, newStart+newCount-1)})
+			reverts[dir] = append(reverts[dir], subHunkReverts(parsed, data, offsets[newOffset], offsets[newOffset+newCount])...)
 		}
 	}
 	return scope, reverts, nil
@@ -121,6 +123,22 @@ func sourceLines(data []byte) [][]byte {
 
 func isGoSource(path string) bool {
 	return strings.HasSuffix(path, ".go") && !strings.HasSuffix(path, "_test.go")
+}
+
+func gitBase(ctx context.Context, dir, revision string) (root, commit string, err error) {
+	rootText, err := git(ctx, dir, "rev-parse", "--show-toplevel")
+	if err != nil {
+		return "", "", err
+	}
+	root, err = filepath.EvalSymlinks(strings.TrimSuffix(string(rootText), "\n"))
+	if err != nil {
+		return "", "", err
+	}
+	commitText, err := git(ctx, root, "rev-parse", "--verify", "--end-of-options", revision+"^{commit}")
+	if err != nil {
+		return "", "", err
+	}
+	return root, strings.TrimSpace(string(commitText)), nil
 }
 
 func git(ctx context.Context, dir string, args ...string) ([]byte, error) {

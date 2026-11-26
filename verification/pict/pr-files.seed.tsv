@@ -1,0 +1,11 @@
+Change	Location	Layout
+modified	root	flat
+deleted	nested	flat
+added	root	flat
+untracked	nested	flat
+type-change	root	flat
+and	root	flat
+or	nested	multiline
+field	root	comments
+mixed	nested	flat
+replacement	root	flat
