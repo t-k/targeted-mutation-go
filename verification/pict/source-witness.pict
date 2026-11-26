@@ -1,0 +1,3 @@
+Type: integer, string, boolean, float
+Arguments: one, two
+Mutation: different, equivalent, panic, build-failure

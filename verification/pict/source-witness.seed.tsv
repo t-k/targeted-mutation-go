@@ -1,0 +1,8 @@
+Type	Arguments	Mutation
+integer	two	different
+string	one	different
+string	two	different
+float	one	different
+boolean	two	equivalent
+integer	one	panic
+float	two	build-failure
