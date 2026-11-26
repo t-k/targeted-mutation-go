@@ -226,6 +226,41 @@ func TestCLIResumesCompletedResultsAndRejectsChangedTests(t *testing.T) {
 	}
 }
 
+func TestCheckpointIncludesFixturesOfSiblingTestPackages(t *testing.T) {
+	dir := t.TempDir()
+	writeFiles(t, dir, map[string]string{
+		"go.mod":                  "module example.org/sibling\n\ngo 1.26.0\n",
+		"lib/lib.go":              "package lib\nfunc Ready(x int) bool { return x >= 1 }\n",
+		"consumer/testdata/limit": "1",
+		"consumer/limit_test.go": `package consumer
+import ("os"; "strconv"; "testing"; "example.org/sibling/lib")
+func TestLimit(t *testing.T) {
+	raw, err := os.ReadFile("testdata/limit")
+	if err != nil { t.Fatal(err) }
+	limit, err := strconv.Atoi(string(raw))
+	if err != nil || !lib.Ready(limit) { t.Fatal("limit") }
+}
+`,
+	})
+	libDir := filepath.Join(dir, "lib")
+	path := filepath.Join(dir, "resume.jsonl")
+	args := []string{"--checkpoint=" + path, "--comparison=boundary", "--test-package=../consumer", "."}
+	r, code := analyzeJSON(t, libDir, args...)
+	if code != 0 || r.Killed != 1 {
+		t.Fatalf("initial campaign exit %d, report %+v", code, r)
+	}
+	resumed, code := analyzeJSON(t, libDir, args...)
+	if code != 0 || resumed.Resumed != 1 {
+		t.Fatalf("unchanged sibling fixture did not resume: exit %d, %+v", code, resumed)
+	}
+	writeFiles(t, dir, map[string]string{"consumer/testdata/limit": "2"})
+	var stdout, stderr bytes.Buffer
+	code = Execute(context.Background(), append([]string{"analyze", "--dir", libDir}, args...), &stdout, &stderr)
+	if code != 1 || !strings.Contains(stderr.String(), "fingerprint") {
+		t.Fatalf("changed sibling fixture reused the campaign: exit %d, %s %s", code, &stdout, &stderr)
+	}
+}
+
 func TestCLIVerifiesConcreteSourceWitness(t *testing.T) {
 	dir := t.TempDir()
 	writeFiles(t, dir, map[string]string{
@@ -301,6 +336,31 @@ func TestCLIRecognizesWeakenedTestsSinceRevision(t *testing.T) {
 				t.Fatalf("unexpected weakened classification with exit %d: %+v", code, r.Findings)
 			}
 		})
+	}
+}
+
+func TestCLIFindsWeakeningAfterDeletingTheOnlyFileInATestPackage(t *testing.T) {
+	dir := t.TempDir()
+	writeFiles(t, dir, map[string]string{
+		"go.mod":     "module example.org/deletedtests\n\ngo 1.26.0\n",
+		"lib/lib.go": "package lib\nfunc Ready(x int) bool { return x >= 1 }\n",
+		"integration/only_test.go": `package integration
+import ("testing"; "example.org/deletedtests/lib")
+func TestReady(t *testing.T) { if !lib.Ready(1) { t.Fatal("boundary") } }
+`,
+	})
+	runGit(t, dir, "init", "-q")
+	runGit(t, dir, "add", ".")
+	runGit(t, dir, "-c", "user.name=TMT Test", "-c", "user.email=tmt@example.invalid", "-c", "commit.gpgsign=false", "commit", "-qm", "base")
+	if err := os.Remove(filepath.Join(dir, "integration", "only_test.go")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(dir, "integration")); err != nil {
+		t.Fatal(err)
+	}
+	r, code := analyzeJSON(t, dir, "--since=HEAD", "--comparison=boundary", "./...")
+	if code != 2 || r.Incomplete != 0 || len(r.Findings) != 1 || r.Findings[0].Status != "weakened-test" {
+		t.Fatalf("deleted integration test not compared: exit %d, report %+v", code, r)
 	}
 }
 

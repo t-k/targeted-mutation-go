@@ -71,6 +71,8 @@ func (s *session) campaignFingerprint(ctx context.Context, journalPath string) (
 	workspace := cfg.Dir
 	if filepath.IsAbs(s.env.GOWORK) {
 		workspace = filepath.Dir(s.env.GOWORK)
+	} else if filepath.IsAbs(s.env.GOMOD) && s.env.GOMOD != os.DevNull {
+		workspace = filepath.Dir(s.env.GOMOD)
 	}
 	if err := filepath.WalkDir(workspace, func(path string, entry fs.DirEntry, err error) error {
 		if err != nil {

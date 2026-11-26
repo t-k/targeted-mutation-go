@@ -83,6 +83,7 @@ type session struct {
 	journal      *checkpoint.Journal[Finding]
 	baselineKey  string
 	testOverlays []target.Replacement
+	virtualDirs  map[string]string
 }
 
 func Run(ctx context.Context, cfg Config) (Report, error) {
@@ -374,7 +375,7 @@ func (s *session) prepare(ctx context.Context, base commandResult, report *Repor
 			continue
 		}
 		consumer := consumer{
-			pkg: pkg.Path, dir: pkg.Dir,
+			pkg: pkg.Path, dir: s.testDirectory(pkg),
 			binary: filepath.Join(s.scratch, fmt.Sprintf("package-%d.test", i)),
 		}
 		s.consumers = append(s.consumers, consumer)
@@ -386,7 +387,7 @@ func (s *session) prepare(ctx context.Context, base commandResult, report *Repor
 	}
 	results := parallel(ctx, s.cfg.Jobs, len(s.consumers), func(i int) error {
 		bin := &s.consumers[i]
-		if err := s.build(ctx, s.overlay, bin, 1); err != nil {
+		if err := s.buildTest(ctx, s.overlay, bin, 1, s.virtualDirs[bin.pkg] != ""); err != nil {
 			return err
 		}
 		trace, err := newTrace(s.scratch, len(s.sites))
@@ -435,7 +436,14 @@ func sameInventory(first, second []string) bool {
 }
 
 func (s *session) build(ctx context.Context, overlay string, bin *consumer, jobs int) error {
+	return s.buildTest(ctx, overlay, bin, jobs, false)
+}
+
+func (s *session) buildTest(ctx context.Context, overlay string, bin *consumer, jobs int, skipVet bool) error {
 	args := []string{"test", "-c", "-o", bin.binary, "-overlay=" + overlay, "-p=" + strconv.Itoa(jobs)}
+	if skipVet {
+		args = append(args, "-vet=off")
+	}
 	args = append(args, s.buildFlags()...)
 	args = append(args, bin.pkg)
 	build := runCommand(ctx, s.cfg.BuildTimeout, s.cfg.Dir, cleanEnv(), "go", args...)
@@ -473,6 +481,13 @@ func (s *session) buildFlags() []string {
 }
 
 func (s *session) goTest(ctx context.Context, overlay string, patterns ...string) commandResult {
+	if len(s.virtualDirs) != 0 {
+		return s.goTestWithVirtualPackages(ctx, overlay)
+	}
+	return s.goTestCommand(ctx, overlay, patterns...)
+}
+
+func (s *session) goTestCommand(ctx context.Context, overlay string, patterns ...string) commandResult {
 	args := []string{"test", "-json", "-count=1", "-timeout=" + s.cfg.Timeout.String(), "-p=" + strconv.Itoa(s.cfg.Jobs)}
 	if s.cfg.TestRun != "" {
 		args = append(args, "-run="+s.cfg.TestRun)

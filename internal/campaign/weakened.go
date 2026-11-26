@@ -16,9 +16,7 @@ func previousTestSelection(ctx context.Context, cfg Config) ([]target.Replacemen
 	if len(files) == 0 || err != nil {
 		return nil, nil, err
 	}
-	if len(cfg.TestPatterns) == 0 {
-		cfg.TestPatterns = cfg.Patterns
-	}
+	cfg = selectedTestConfig(cfg)
 	packages, err := resolveTestPackages(ctx, cfg)
 	if err != nil {
 		return nil, nil, err
@@ -27,8 +25,34 @@ func previousTestSelection(ctx context.Context, cfg Config) ([]target.Replacemen
 	for _, pkg := range packages {
 		dirs[pkg.Dir] = true
 	}
+	if slices.ContainsFunc(files, func(f target.Replacement) bool { return f.Data != nil && !dirs[filepath.Dir(f.Path)] }) {
+		dir, err := os.MkdirTemp("", "tmt-previous-test-selection-")
+		if err != nil {
+			return nil, nil, err
+		}
+		defer os.RemoveAll(dir)
+		overlay, err := makeOverlay(dir, files)
+		if err != nil {
+			return nil, nil, err
+		}
+		prior, err := resolveTestPackages(ctx, cfg, overlay)
+		if err != nil {
+			// The old overlay will receive an explicit unconfirmed baseline verdict.
+			return files, packages, nil
+		}
+		for _, pkg := range prior {
+			dirs[pkg.Dir] = true
+		}
+	}
 	files = slices.DeleteFunc(files, func(f target.Replacement) bool { return !dirs[filepath.Dir(f.Path)] })
 	return files, packages, nil
+}
+
+func selectedTestConfig(cfg Config) Config {
+	if len(cfg.TestPatterns) == 0 {
+		cfg.TestPatterns = cfg.Patterns
+	}
+	return cfg
 }
 
 type previousCandidate struct {
@@ -40,7 +64,11 @@ type previousCandidate struct {
 func (s *session) comparePrevious(ctx context.Context, report *Report, changed target.Scope, files []target.Replacement, reached [][]*consumer) error {
 	candidates := s.previousCandidates(report, changed, reached)
 	report.Findings = slices.DeleteFunc(report.Findings, func(f Finding) bool {
-		return f.Rule != "revert" && !changed.Contains(filepath.Join(s.cfg.Dir, filepath.FromSlash(f.File)), f.Line, f.Line)
+		switch f.Status {
+		case "input-gap", "assertion-gap", "source-survivor", "non-viable", "unreached", "killed":
+			return !changed.Contains(filepath.Join(s.cfg.Dir, filepath.FromSlash(f.File)), f.Line, f.Line)
+		}
+		return false
 	})
 	if len(candidates) == 0 {
 		return nil
@@ -54,6 +82,19 @@ func (s *session) comparePrevious(ctx context.Context, report *Report, changed t
 	prior.scratch, prior.consumers, prior.testOverlays, prior.journal = dir, nil, files, nil
 	baselineOverlay, err := makeOverlay(dir, files)
 	if err != nil {
+		return err
+	}
+	setup, cancel := context.WithTimeout(ctx, s.cfg.BuildTimeout)
+	prior.testPackages, err = resolveTestPackages(setup, selectedTestConfig(s.cfg), baselineOverlay)
+	cancel()
+	if err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		s.uncheckedPrevious(report, files[0].Path, "could not load previous test packages: "+err.Error())
+		return nil
+	}
+	if err := prior.setVirtualDirs(); err != nil {
 		return err
 	}
 	base := prior.goTest(ctx, baselineOverlay, s.testPatterns()...)
@@ -119,6 +160,87 @@ func (s *session) comparePrevious(ctx context.Context, report *Report, changed t
 		}
 	}
 	return nil
+}
+
+// Go overlays can expose a package whose directory was deleted, but an executable
+// cannot enter a virtual directory. Give it a private physical directory instead.
+func (s *session) setVirtualDirs() error {
+	for _, pkg := range s.testPackages {
+		if _, err := os.Stat(pkg.Dir); err != nil {
+			if !os.IsNotExist(err) {
+				return err
+			}
+			dir, err := os.MkdirTemp(s.scratch, "virtual-test-package-")
+			if err != nil {
+				return err
+			}
+			if s.virtualDirs == nil {
+				s.virtualDirs = make(map[string]string)
+			}
+			s.virtualDirs[pkg.Path] = dir
+		}
+	}
+	return nil
+}
+
+func (s *session) testDirectory(pkg target.Package) string {
+	if dir := s.virtualDirs[pkg.Path]; dir != "" {
+		return dir
+	}
+	return pkg.Dir
+}
+
+func (s *session) goTestWithVirtualPackages(ctx context.Context, overlay string) commandResult {
+	var physical, virtual []target.Package
+	for _, pkg := range s.testPackages {
+		if s.virtualDirs[pkg.Path] == "" {
+			physical = append(physical, pkg)
+		} else {
+			virtual = append(virtual, pkg)
+		}
+	}
+	result := commandResult{kind: "passed", inventory: make(map[string][]string), packages: make(map[string]string)}
+	if len(physical) != 0 {
+		patterns := make([]string, len(physical))
+		for i, pkg := range physical {
+			patterns[i] = pkg.Path
+		}
+		result = s.goTestCommand(ctx, overlay, patterns...)
+		if result.kind != "passed" && result.kind != "failed" {
+			return result
+		}
+		if result.inventory == nil {
+			result.inventory = make(map[string][]string)
+		}
+		if result.packages == nil {
+			result.packages = make(map[string]string)
+		}
+	}
+	dir, err := os.MkdirTemp(s.scratch, "virtual-test-build-")
+	if err != nil {
+		return commandResult{kind: "error", detail: err.Error()}
+	}
+	defer os.RemoveAll(dir)
+	for i, pkg := range virtual {
+		bin := consumer{pkg: pkg.Path, dir: s.testDirectory(pkg), binary: filepath.Join(dir, fmt.Sprintf("test-%d", i))}
+		if err := s.buildTest(ctx, overlay, &bin, 1, true); err != nil {
+			return commandResult{kind: "error", detail: err.Error()}
+		}
+		run := s.runBinary(ctx, &bin, "", "", "")
+		switch run.kind {
+		case "passed":
+			result.packages[pkg.Path] = "pass"
+		case "failed":
+			result.kind, result.packages[pkg.Path] = "failed", "fail"
+			result.failed = append(result.failed, run.failed...)
+		default:
+			return run
+		}
+		if len(run.events) != 0 {
+			result.inventory[pkg.Path] = run.events
+		}
+	}
+	return result
 }
 
 func previousUnconfirmed(status string) bool {

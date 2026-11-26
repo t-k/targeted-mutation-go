@@ -18,7 +18,7 @@ import (
 
 type goEnvironment struct {
 	GOROOT, GOOS, GOARCH, GOFLAGS string
-	GOVERSION, GOWORK             string
+	GOVERSION, GOWORK, GOMOD      string
 }
 
 type commandResult struct {
@@ -35,7 +35,7 @@ type commandResult struct {
 }
 
 func environment(ctx context.Context, dir string) (goEnvironment, error) {
-	cmd := exec.CommandContext(ctx, "go", "env", "-json", "GOROOT", "GOOS", "GOARCH", "GOFLAGS", "GOVERSION", "GOWORK")
+	cmd := exec.CommandContext(ctx, "go", "env", "-json", "GOROOT", "GOOS", "GOARCH", "GOFLAGS", "GOVERSION", "GOWORK", "GOMOD")
 	cmd.Dir = dir
 	configureProcess(cmd)
 	out, err := cmd.Output()

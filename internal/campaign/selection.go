@@ -20,10 +20,13 @@ func (s *session) testPatterns() []string {
 	return s.cfg.Patterns
 }
 
-func resolveTestPackages(ctx context.Context, cfg Config) ([]target.Package, error) {
+func resolveTestPackages(ctx context.Context, cfg Config, overlay ...string) ([]target.Package, error) {
 	options := &packages.Config{Context: ctx, Dir: cfg.Dir, Mode: packages.NeedName | packages.NeedFiles}
 	if cfg.Tags != "" {
 		options.BuildFlags = []string{"-tags=" + cfg.Tags}
+	}
+	if len(overlay) != 0 {
+		options.BuildFlags = append(options.BuildFlags, "-overlay="+overlay[0])
 	}
 	loaded, err := packages.Load(options, cfg.TestPatterns...)
 	if err != nil {
