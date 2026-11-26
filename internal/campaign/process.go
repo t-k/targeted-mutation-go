@@ -49,10 +49,18 @@ func environment(ctx context.Context, dir string) (goEnvironment, error) {
 		return env, fmt.Errorf("native probe execution requires Linux or macOS")
 	}
 	for _, flag := range strings.Fields(env.GOFLAGS) {
-		key, _, _ := strings.Cut(strings.Trim(flag, "'\""), "=")
-		switch key {
-		case "-overlay", "-exec", "-run", "-skip", "-bench", "-count", "-short", "-parallel", "-shuffle", "-failfast", "-v", "-fuzz", "-list", "-vet":
+		key, value, _ := strings.Cut(strings.Trim(flag, "'\""), "=")
+		normalized := strings.TrimPrefix(strings.TrimLeft(key, "-"), "test.")
+		switch normalized {
+		case "overlay", "exec", "run", "skip", "bench", "count", "short", "parallel", "shuffle",
+			"failfast", "v", "fuzz", "fuzzcachedir", "list", "vet", "o", "c", "json", "n",
+			"outputdir", "cover", "coverprofile", "cpuprofile", "memprofile", "blockprofile",
+			"mutexprofile", "trace", "testlogfile", "modfile":
 			return env, fmt.Errorf("GOFLAGS option %s conflicts with campaign execution", key)
+		case "mod":
+			if value != "readonly" && value != "vendor" {
+				return env, fmt.Errorf("GOFLAGS option %s can modify module files", flag)
+			}
 		}
 	}
 	return env, nil

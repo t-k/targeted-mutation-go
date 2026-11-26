@@ -1,0 +1,4 @@
+Protocol: binary, go-json
+Disposition: pass, skip, fail
+Noise: none, lookalike
+Chunk: full, bytes

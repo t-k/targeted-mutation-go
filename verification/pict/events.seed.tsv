@@ -1,0 +1,4 @@
+Protocol	Disposition	Noise	Chunk
+binary	pass	lookalike	bytes
+binary	skip	none	full
+go-json	fail	lookalike	bytes

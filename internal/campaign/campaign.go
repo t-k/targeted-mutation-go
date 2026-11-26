@@ -127,13 +127,12 @@ func Run(ctx context.Context, cfg Config) (Report, error) {
 	if err := s.validateSnapshots(); err != nil {
 		return report, err
 	}
-	if len(s.sites)+len(s.sources) == 0 {
-		return report, nil
-	}
-
 	base := s.goTest(ctx, "", cfg.Patterns...)
 	if base.kind != "passed" {
 		return report, fmt.Errorf("ordinary Go test baseline %s:\n%s", base.kind, base.detail)
+	}
+	if len(s.sites)+len(s.sources) == 0 {
+		return report, nil
 	}
 	if len(s.sites) > 0 {
 		for _, replacement := range s.replacements {
@@ -247,7 +246,9 @@ func (s *session) collect(reverts map[string][]target.Replacement) []target.Repl
 }
 
 func (s *session) prepare(ctx context.Context, base commandResult, report *Report) error {
+	known := make(map[string]bool, len(s.packages))
 	for i, pkg := range s.packages {
+		known[pkg.Path] = true
 		if base.packages[pkg.Path] == "skip" {
 			continue
 		}
@@ -256,6 +257,11 @@ func (s *session) prepare(ctx context.Context, base commandResult, report *Repor
 			binary: filepath.Join(s.scratch, fmt.Sprintf("package-%d.test", i)),
 		}
 		s.consumers = append(s.consumers, consumer)
+	}
+	for pkg, disposition := range base.packages {
+		if disposition == "pass" && !known[pkg] {
+			return fmt.Errorf("ordinary baseline ran an undiscovered test package: %s", pkg)
+		}
 	}
 	results := parallel(ctx, s.cfg.Jobs, len(s.consumers), func(i int) error {
 		bin := &s.consumers[i]

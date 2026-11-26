@@ -12,7 +12,6 @@ import (
 	"go/types"
 	"math"
 	"os"
-	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -98,9 +97,12 @@ func Discover(ctx context.Context, dir string, patterns []string, tags string, s
 			return nil, fmt.Errorf("load %s: %s", pkg.PkgPath, pkg.Errors[0])
 		}
 		if len(pkg.GoFiles) == 0 {
+			if pkg.Dir != "" {
+				results = append(results, Package{Path: pkg.PkgPath, Dir: pkg.Dir, Name: pkg.Name})
+			}
 			continue
 		}
-		p := Package{Path: pkg.PkgPath, Name: pkg.Name, Dir: filepath.Dir(pkg.GoFiles[0]), Paths: pkg.GoFiles}
+		p := Package{Path: pkg.PkgPath, Name: pkg.Name, Dir: pkg.Dir, Paths: pkg.GoFiles}
 		hash := sha256.Sum256([]byte(pkg.PkgPath))
 		p.Prefix = fmt.Sprintf("tmtGo%x", hash[:6])
 		if pkg.Module != nil && !pkg.Module.Main {

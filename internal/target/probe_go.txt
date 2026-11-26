@@ -1,12 +1,12 @@
 package PROBE_PACKAGE
 
 import (
-	"os"
-	"strconv"
-	"strings"
-	"sync/atomic"
-	"syscall"
-	"unsafe"
+	PROBEos "os"
+	PROBEstrconv "strconv"
+	PROBEstrings "strings"
+	PROBEatomic "sync/atomic"
+	PROBEsyscall "syscall"
+	PROBEunsafe "unsafe"
 )
 
 type PROBEInteger interface {
@@ -25,11 +25,11 @@ var PROBEStateValue = PROBEOpen()
 
 func PROBEOpen() PROBEState {
 	state := PROBEState{site: -1}
-	path := os.Getenv("TMT_GO_TRACE")
+	path := PROBEos.Getenv("TMT_GO_TRACE")
 	if path == "" {
 		return state
 	}
-	f, err := os.OpenFile(path, os.O_RDWR, 0)
+	f, err := PROBEos.OpenFile(path, PROBEos.O_RDWR, 0)
 	if err != nil {
 		panic(err)
 	}
@@ -38,29 +38,29 @@ func PROBEOpen() PROBEState {
 	if err != nil {
 		panic(err)
 	}
-	data, err := syscall.Mmap(int(f.Fd()), 0, int(info.Size()), syscall.PROT_READ|syscall.PROT_WRITE, syscall.MAP_SHARED)
+	data, err := PROBEsyscall.Mmap(int(f.Fd()), 0, int(info.Size()), PROBEsyscall.PROT_READ|PROBEsyscall.PROT_WRITE, PROBEsyscall.MAP_SHARED)
 	if err != nil {
 		panic(err)
 	}
-	state.slots = unsafe.Slice((*uint64)(unsafe.Pointer(&data[0])), len(data)/8)
-	if mode := os.Getenv("TMT_GO_MUTATION"); mode != "" {
-		fields := strings.Split(mode, ":")
+	state.slots = PROBEunsafe.Slice((*uint64)(PROBEunsafe.Pointer(&data[0])), len(data)/8)
+	if mode := PROBEos.Getenv("TMT_GO_MUTATION"); mode != "" {
+		fields := PROBEstrings.Split(mode, ":")
 		if len(fields) != 4 {
 			panic("invalid mutation selector")
 		}
-		state.site, err = strconv.Atoi(fields[0])
+		state.site, err = PROBEstrconv.Atoi(fields[0])
 		if err != nil {
 			panic(err)
 		}
-		state.mask, err = strconv.ParseUint(fields[1], 10, 64)
+		state.mask, err = PROBEstrconv.ParseUint(fields[1], 10, 64)
 		if err != nil {
 			panic(err)
 		}
-		state.pivot, err = strconv.ParseUint(fields[2], 10, 64)
+		state.pivot, err = PROBEstrconv.ParseUint(fields[2], 10, 64)
 		if err != nil {
 			panic(err)
 		}
-		state.shift, err = strconv.ParseBool(fields[3])
+		state.shift, err = PROBEstrconv.ParseBool(fields[3])
 		if err != nil {
 			panic(err)
 		}
@@ -105,29 +105,29 @@ func PROBECompare[T PROBEInteger](site int, mask uint64, left, right T) uint64 {
 		if original != mutant {
 			flags |= 16
 		}
-		if word := &state.slots[site*3]; atomic.LoadUint64(word)&flags != flags {
-			atomic.OrUint64(word, flags)
+		if word := &state.slots[site*3]; PROBEatomic.LoadUint64(word)&flags != flags {
+			PROBEatomic.OrUint64(word, flags)
 		}
 		return mutantOrder & state.mask
 	}
 	slot := state.slots[site*3 : site*3+3]
 	if order == 1 {
 		value := PROBERank(left)
-		for old := atomic.LoadUint64(&slot[1]); old < value; old = atomic.LoadUint64(&slot[1]) {
-			if atomic.CompareAndSwapUint64(&slot[1], old, value) {
+		for old := PROBEatomic.LoadUint64(&slot[1]); old < value; old = PROBEatomic.LoadUint64(&slot[1]) {
+			if PROBEatomic.CompareAndSwapUint64(&slot[1], old, value) {
 				break
 			}
 		}
 	} else if order == 4 {
 		value := ^PROBERank(left)
-		for old := atomic.LoadUint64(&slot[2]); old < value; old = atomic.LoadUint64(&slot[2]) {
-			if atomic.CompareAndSwapUint64(&slot[2], old, value) {
+		for old := PROBEatomic.LoadUint64(&slot[2]); old < value; old = PROBEatomic.LoadUint64(&slot[2]) {
+			if PROBEatomic.CompareAndSwapUint64(&slot[2], old, value) {
 				break
 			}
 		}
 	}
-	if atomic.LoadUint64(&slot[0])&order == 0 {
-		atomic.OrUint64(&slot[0], order)
+	if PROBEatomic.LoadUint64(&slot[0])&order == 0 {
+		PROBEatomic.OrUint64(&slot[0], order)
 	}
 	return order & mask
 }

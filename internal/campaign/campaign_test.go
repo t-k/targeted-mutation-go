@@ -114,6 +114,7 @@ func TestCampaignKeepsNamedBoolAndIgnoresTestLikeStdout(t *testing.T) {
 	fixture(t, dir, "go.mod", "module example.org/named\n\ngo 1.26.0\n")
 	fixture(t, dir, "named.go", `package named
 type Flag bool
+var atomic = 1
 func Ready(n int) Flag { return n > 0 }
 `)
 	fixture(t, dir, "named_test.go", `package named
@@ -204,4 +205,43 @@ func TestScope(t *testing.T) {
 		}
 	}
 	t.Fatalf("missing Git revert survivor: %+v", report)
+}
+
+func TestTestOnlyConsumerDetectsTheBoundary(t *testing.T) {
+	dir := t.TempDir()
+	fixture(t, dir, "go.mod", "module example.org/consumer\n\ngo 1.26.0\n")
+	fixture(t, dir, "limit/limit.go", "package limit\nfunc Free(x int) bool { return x >= 50 }\n")
+	fixture(t, dir, "limit/limit_test.go", `package limit
+import "testing"
+func TestLoose(t *testing.T) { if Free(0) || !Free(100) { t.Fatal("loose limit") } }
+`)
+	fixture(t, dir, "integration/integration_test.go", `package integration_test
+import ("testing"; "example.org/consumer/limit")
+func TestBoundary(t *testing.T) { if !limit.Free(50) { t.Fatal("wrong boundary") } }
+`)
+	result, err := Run(context.Background(), Config{Dir: dir, Comparison: "boundary", KilledFindings: true})
+	if err != nil || result.Killed != 1 || result.Builds != 2 {
+		t.Fatalf("test-only consumer was omitted: %+v, %v", result, err)
+	}
+}
+
+func TestProfileFlagsAndEmptyScopeBaseline(t *testing.T) {
+	dir := t.TempDir()
+	fixture(t, dir, "go.mod", "module example.org/empty\n\ngo 1.26.0\n")
+	fixture(t, dir, "empty.go", "package empty\nfunc Value() int { return 1 }\n")
+	fixture(t, dir, "empty_test.go", "package empty\nimport \"testing\"\nfunc TestBroken(t *testing.T) { t.Fatal(\"intentionally failing\") }\n")
+	_, err := Run(context.Background(), Config{Dir: dir})
+	if err == nil || !strings.Contains(err.Error(), "intentionally failing") {
+		t.Errorf("empty scope did not validate its baseline: %v", err)
+	}
+	fixture(t, dir, "coverage.out", "original data")
+	t.Setenv("GOFLAGS", "-coverprofile=coverage.out")
+	_, err = Run(context.Background(), Config{Dir: dir})
+	if err == nil || !strings.Contains(err.Error(), "coverprofile") {
+		t.Errorf("profiling flags should be rejected: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, "coverage.out"))
+	if err != nil || string(data) != "original data" {
+		t.Fatalf("profile output changed: %q, %v", data, err)
+	}
 }
