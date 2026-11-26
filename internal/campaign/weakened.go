@@ -64,6 +64,9 @@ type previousCandidate struct {
 func (s *session) comparePrevious(ctx context.Context, report *Report, changed target.Scope, files []target.Replacement, reached [][]*consumer) error {
 	candidates := s.previousCandidates(report, changed, reached)
 	report.Findings = slices.DeleteFunc(report.Findings, func(f Finding) bool {
+		if f.Rule == "revert" {
+			return false
+		}
 		switch f.Status {
 		case "input-gap", "assertion-gap", "source-survivor", "non-viable", "unreached", "killed":
 			return !changed.Contains(filepath.Join(s.cfg.Dir, filepath.FromSlash(f.File)), f.Line, f.Line)

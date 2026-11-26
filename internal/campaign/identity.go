@@ -11,22 +11,38 @@ import (
 	"strings"
 
 	"github.com/t-k/targeted-mutation-go/internal/analysis"
+	"github.com/t-k/targeted-mutation-go/internal/target"
 )
 
 type sourceAnchor struct {
-	line       string
+	key        string
 	occurrence int
 	indent     int
 }
 
-func sourceAnchors(data []byte) []sourceAnchor {
-	seen := make(map[string]int)
+func sourceAnchors(data []byte, owners []target.Declaration) []sourceAnchor {
+	type anchorKey struct{ owner, code string }
+	seen := make(map[anchorKey]int)
+	keys := make(map[anchorKey]string)
 	var anchors []sourceAnchor
 	for line := range strings.SplitSeq(string(data), "\n") {
-		code := strings.TrimSpace(line)
+		number := len(anchors) + 1
+		for len(owners) != 0 && owners[0].End < number {
+			owners = owners[1:]
+		}
+		key := anchorKey{code: strings.TrimSpace(line)}
+		if len(owners) != 0 && owners[0].Start <= number {
+			key.owner = owners[0].Name
+		}
+		id, exists := keys[key]
+		if !exists {
+			hash := sha256.Sum256([]byte(key.owner + "\x00" + key.code))
+			id = hex.EncodeToString(hash[:16])
+			keys[key] = id
+		}
 		indent := len(line) - len(strings.TrimLeft(line, " \t"))
-		anchors = append(anchors, sourceAnchor{line: code, occurrence: seen[code], indent: indent})
-		seen[code]++
+		anchors = append(anchors, sourceAnchor{key: id, occurrence: seen[key], indent: indent})
+		seen[key]++
 	}
 	return anchors
 }
@@ -38,7 +54,7 @@ func (s *session) identify(f *Finding) {
 	} else {
 		anchor.occurrence = f.Line
 	}
-	data, _ := json.Marshal([]any{f.File, f.Rule, f.Expression, f.Mutation, anchor.line,
+	data, _ := json.Marshal([]any{f.File, f.Rule, f.Expression, f.Mutation, anchor.key,
 		anchor.occurrence, max(0, f.Column-anchor.indent)})
 	hash := sha256.Sum256(data)
 	f.ID = hex.EncodeToString(hash[:16])

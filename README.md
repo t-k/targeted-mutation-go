@@ -46,6 +46,7 @@ targeted-mutation-go analyze --since "$base" --undo-changes --full ./...
 | Conditions and branches | Boolean operand replacement, logical swaps and removal of negation, forced and negated conditions, break/continue swaps, early range breaks, empty blocks and cases |
 | Values and returns | Integer and float literal steps, string and boolean literals, type-appropriate zero values, forced boolean returns, nil returns |
 | Errors and statements | Nil error checks, `%w` to `%v` error wrapping, statement deletion, discarded assignment results |
+| Standard APIs and numeric intent | Built-in, `math` and `slices` min/max swaps, rounding modes, `strings` and `bytes` prefix/suffix and search changes, single versus all replacements, literal slice element omission, integer multiply/divide order |
 
 The catalogue was built against Gremlins 0.6.0, gomutants 0.7.3, gomu 0.3.0 and go-mutants 0.1.2. The peer fixture checks representative outcomes across those versions. Actual candidates depend on the selected files, build tags, scope, and whether the edited program compiles. [Peer verification and performance](benchmarks/README.md)
 
@@ -57,13 +58,33 @@ The catalogue was built against Gremlins 0.6.0, gomutants 0.7.3, gomu 0.3.0 and 
 | `ASSERTION GAP` | The mutant changed a comparison result in the listed test packages and the same tests still passed. |
 | `SOURCE SURVIVOR` | The source edit passed the selected suite, or a comparison probe established that the edit survived or agreed with the recorded comparisons. |
 | `UNTESTED CHANGE` | The selected suite passed after a Git hunk was restored. |
+| `WEAKENED TEST` | Restored Go tests killed the same edit on the current production source. The current tests let it survive or leave it unreached. |
 | `UNREACHED` | The selected test binaries left this comparison unobserved. Use `--show-unreached` to list it. |
 | `NON VIABLE` | A Go language rule or compiler diagnostics establish that the edit cannot compile. |
 | `UNSTABLE`, `TIMEOUT`, `BUILD ERROR`, `ERROR` | The campaign could not establish a verdict. |
 
-A witness marked `verified` passed on the original and failed with the mutant applied. A suggested operand can be useful even when the tool cannot derive an end-to-end test call. Automatic witness compilation currently supports direct comparisons of a single integer parameter in a standalone function.
+A witness marked `verified` passed on the original and failed with the mutant applied. `--verify-witnesses` verifies direct integer comparison calls, including functions with extra scalar parameters. The planner filters out values ruled out by a constant bitmask or a constant-divisor remainder. When a function call cannot be synthesized, the report can still give the distinguishing operand.
+
+`--suggest-assertions` isolates tests for a surviving comparison probe, confirms which test executions saw the changed result, and verifies a copyable Go assertion when it can construct the call. Initialization and `TestMain` observations are excluded from test attribution when they also occur with no selected tests. The search checks up to 32 isolated test selections per finding. Both suggestion flags can also verify assertions for surviving source edits, including in `--source-only`. The source search tries up to 80 input combinations for each of up to eight surviving edits, prioritizing semantic rules. It supports non-generic free functions with up to three basic scalar arguments and one basic scalar result. JSON reports include the resulting Go code under `witness.code` or `source_witness.code`.
 
 JSON reports use `schema: 1`. Integers in thresholds and witnesses are decimal strings to preserve 64-bit values. Exit codes are `0` for a complete run with no gaps, `1` for usage, baseline, or infrastructure errors, `2` for a complete run with gaps, and `3` for a run with incomplete findings.
+
+## Pull requests and CI
+
+```sh
+targeted-mutation-go analyze --full --suggest-assertions --since origin/main --undo-changes ./...
+targeted-mutation-go analyze --lines internal/price/rates.go:40-80 --test-package ./integration/... --test '^TestRates$' ./internal/price
+targeted-mutation-go analyze --full --list --shard 0/4 --format jsonl ./...
+targeted-mutation-go analyze --full --baseline .tmt-baseline.json --format sarif ./...
+targeted-mutation-go analyze --full --checkpoint .tmt-campaign.jsonl --audit 5 ./...
+```
+
+- `--since` limits ordinary findings to changed production lines and compares changed Go test files with their base revision on the current production source. `--undo-changes` tries complete hunks and independent added `&&` or `||` terms and keyed composite literal fields where it can isolate the edit. A previous suite that cannot pass on the current production source produces an incomplete comparison.
+- Repeat `--lines FILE[:LINE|:FROM-TO]` to restrict the mutation locations. With `--since`, the line restrictions intersect the Git scope. Repeat `--test-package` to provide the Go package patterns for the suite independently of the mutation patterns. `--test` uses Go's `-run` pattern for tests and subtests.
+- `--list` previews candidates without running tests. Threshold previews include observation-dependent candidates that the actual run may prune. `--exclude-rule` removes a rule from the campaign. `--shard K/N` deterministically assigns candidate IDs to zero-based shards. Each shard still checks its own baseline.
+- `--format jsonl` emits a summary and one record per finding. `--format sarif` emits SARIF 2.1.0 with stable partial fingerprints. `--write-baseline FILE` records the current gaps, and `--baseline FILE` suppresses those IDs from subsequent output and exit status. IDs include the source file, function, code anchor, and edit. This keeps them stable when the function moves within the file or surrounding lines are inserted.
+- `--checkpoint FILE` resumes completed results with the same campaign fingerprint. The fingerprint includes the executable, configuration, environment, local module files and fixtures, and Go dependency files. The ordinary baseline and comparison observations are refreshed. Keep the journal when restarting the same campaign, and use a different journal for different inputs or runner environments.
+- `--audit N` rebuilds up to `N` completed probe mutations as source edits. A disagreement or an unconfirmed source verdict makes the campaign incomplete.
 
 ## How it works
 

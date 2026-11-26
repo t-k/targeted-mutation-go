@@ -5,6 +5,7 @@ type Report struct {
 	Evaluation   string    `json:"evaluation,omitempty"`
 	Suppressed   int       `json:"suppressed,omitempty"`
 	Resumed      int       `json:"resumed,omitempty"`
+	Audited      int       `json:"audited,omitempty"`
 	PreviousRuns int       `json:"previous_test_runs,omitempty"`
 	Sites        int       `json:"sites"`
 	Builds       int       `json:"instrumented_builds"`

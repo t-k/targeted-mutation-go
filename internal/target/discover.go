@@ -43,10 +43,16 @@ type Package struct {
 }
 
 type File struct {
-	Path  string
-	Data  []byte
-	Sites []*Site
-	Edits []Edit
+	Path   string
+	Data   []byte
+	Sites  []*Site
+	Edits  []Edit
+	Owners []Declaration
+}
+
+type Declaration struct {
+	Start, End int
+	Name       string
 }
 
 type Site struct {
@@ -150,7 +156,7 @@ func Discover(ctx context.Context, dir string, patterns []string, tags string, s
 				return nil, fmt.Errorf("missing parsed source for %s", path)
 			}
 			data := snapshot.([]byte)
-			file := &File{Path: path, Data: data}
+			file := &File{Path: path, Data: data, Owners: declarationOwners(syntax, astFile, data)}
 			if portable {
 				findSites(file, syntax, astFile, pkg, scope, options.Full)
 			}
@@ -173,7 +179,7 @@ func Discover(ctx context.Context, dir string, patterns []string, tags string, s
 					return nil, fmt.Errorf("parse original source %s: %w", path, err)
 				}
 				if options.IncludeGenerated || !ast.IsGenerated(syntax) {
-					file := &File{Path: path, Data: data}
+					file := &File{Path: path, Data: data, Owners: declarationOwners(syntax, fset.File(syntax.Pos()), data)}
 					discoverSourceEdits(file, syntax, fset.File(syntax.Pos()), pkg, scope, true)
 					if len(file.Edits) > 0 {
 						p.Files = append(p.Files, file)
@@ -187,6 +193,28 @@ func Discover(ctx context.Context, dir string, patterns []string, tags string, s
 		results = append(results, p)
 	}
 	return results, nil
+}
+
+func declarationOwners(tree *ast.File, positions *token.File, data []byte) []Declaration {
+	var owners []Declaration
+	for _, decl := range tree.Decls {
+		fn, ok := decl.(*ast.FuncDecl)
+		if !ok {
+			continue
+		}
+		name := fn.Name.Name
+		if fn.Recv != nil && len(fn.Recv.List) != 0 {
+			typ := fn.Recv.List[0].Type
+			receiver := data[positions.Offset(typ.Pos()):positions.Offset(typ.End())]
+			name = strings.Join(strings.Fields(string(receiver)), "") + "." + name
+		}
+		owners = append(owners, Declaration{
+			Start: positions.PositionFor(fn.Pos(), false).Line,
+			End:   positions.PositionFor(fn.End()-1, false).Line,
+			Name:  name,
+		})
+	}
+	return owners
 }
 
 func versionSupportsProbes(v string) bool {

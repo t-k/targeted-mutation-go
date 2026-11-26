@@ -1,0 +1,5 @@
+Profile	Probe	Verdict
+targeted	observed	agrees
+targeted	replayed	disagrees
+full	observed	disagrees
+full	replayed	agrees

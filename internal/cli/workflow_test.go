@@ -364,6 +364,67 @@ func TestReady(t *testing.T) { if !lib.Ready(1) { t.Fatal("boundary") } }
 	}
 }
 
+func TestCLIAuditsProbeVerdictsAgainstTheActualSource(t *testing.T) {
+	table, err := os.ReadFile("../../verification/pict/audit.tsv")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, row := range strings.Split(strings.TrimSpace(string(table)), "\n")[1:] {
+		fields := strings.Fields(row)
+		t.Run(strings.Join(fields, "/"), func(t *testing.T) {
+			dir := t.TempDir()
+			body := `if !Ready(2) { t.Fatal("wrong result") }`
+			if fields[1] == "replayed" {
+				body = `_ = Ready(1)`
+			}
+			if fields[2] == "disagrees" {
+				if fields[1] == "observed" {
+					body = `if os.Getenv("TMT_GO_TRACE") != "" { _ = Ready(2); return }; if !Ready(1) { t.Fatal("boundary") }`
+				} else {
+					body = `if os.Getenv("TMT_GO_MUTATION") != "" { _ = Ready(1); return }; if !Ready(1) { t.Fatal("boundary") }`
+				}
+			}
+			writeFiles(t, dir, map[string]string{
+				"go.mod":        "module example.org/audit\n\ngo 1.26.0\n",
+				"audit.go":      "package audit\nfunc Ready(x int) bool { return x >= 1 }\n",
+				"audit_test.go": "package audit\nimport (\"os\"; \"testing\")\nfunc Test(t *testing.T) { _ = os.Getenv; " + body + " }\n",
+			})
+			args := []string{"--audit=1", "--comparison=boundary"}
+			if fields[0] == "full" {
+				args = append(args, "--full")
+			}
+			report, code := analyzeJSON(t, dir, append(args, ".")...)
+			want := 2
+			if fields[2] == "disagrees" {
+				want = 3
+			}
+			if code != want || report.Audited != 1 {
+				t.Fatalf("exit %d wanted %d, report %+v", code, want, report)
+			}
+			found := false
+			for _, f := range report.Findings {
+				found = found || f.Status == "audit-disagreement"
+			}
+			if found != (want == 3) {
+				t.Fatalf("incorrect audit findings %+v", report.Findings)
+			}
+		})
+	}
+}
+
+func TestStableIDFollowsItsFunctionAcrossAMove(t *testing.T) {
+	dir := t.TempDir()
+	const first = "func First(x int) bool {\n\treturn x >= 1\n}\n"
+	const second = "func Second(x int) bool {\n\treturn x >= 1\n}\n"
+	writeFiles(t, dir, map[string]string{"go.mod": "module example.org/moved\n\ngo 1.26.0\n", "moved.go": "package moved\n" + first + second})
+	before, _ := analyzeJSON(t, dir, "--list", "--comparison=boundary", "--lines=moved.go:3", ".")
+	writeFiles(t, dir, map[string]string{"moved.go": "package moved\n" + second + first})
+	after, _ := analyzeJSON(t, dir, "--list", "--comparison=boundary", "--lines=moved.go:6", ".")
+	if len(before.Findings) != 1 || len(after.Findings) != 1 || before.Findings[0].ID != after.Findings[0].ID {
+		t.Fatalf("moving First changed the finding ID: %+v → %+v", before.Findings, after.Findings)
+	}
+}
+
 func TestCLISelectsMutationSitesAndTestsIndependently(t *testing.T) {
 	data, err := os.ReadFile("../../verification/pict/selection.tsv")
 	if err != nil {

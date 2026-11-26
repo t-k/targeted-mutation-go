@@ -30,6 +30,7 @@ type Config struct {
 	List              bool
 	Shard             string
 	Checkpoint        string
+	Audit             int
 	Tags, Since       string
 	Comparison        string
 	Jobs              int
@@ -117,6 +118,9 @@ func Run(ctx context.Context, cfg Config) (Report, error) {
 	}
 	if cfg.VerifyWitnesses && cfg.Conventional {
 		return report, fmt.Errorf("verify-witnesses is incompatible with conventional analysis")
+	}
+	if cfg.Audit < 0 || cfg.Audit != 0 && (cfg.SourceOnly || cfg.List) {
+		return report, fmt.Errorf("audit requires a nonnegative sample size and probe execution")
 	}
 	shard, err := parseShard(cfg.Shard)
 	if err != nil {
@@ -282,6 +286,11 @@ func Run(ctx context.Context, cfg Config) (Report, error) {
 		}
 		report.add(item.finding, cfg.KilledFindings)
 	}
+	if cfg.Audit != 0 {
+		if err := s.auditProbes(ctx, &report, probeJobs, results, base); err != nil {
+			return report, err
+		}
+	}
 	if len(previous) != 0 {
 		if err := s.comparePrevious(ctx, &report, productionScope, previous, reached); err != nil {
 			return report, err
@@ -322,7 +331,7 @@ func (s *session) collect(reverts map[string][]target.Replacement) []target.Repl
 	for _, pkg := range s.packages {
 		hasSites := false
 		for _, file := range pkg.Files {
-			s.anchors[s.rel(file.Path)] = sourceAnchors(file.Data)
+			s.anchors[s.rel(file.Path)] = sourceAnchors(file.Data, file.Owners)
 			for i := range file.Edits {
 				edit := &file.Edits[i]
 				finding := Finding{File: s.rel(edit.File), Line: edit.Line, Column: edit.Column,

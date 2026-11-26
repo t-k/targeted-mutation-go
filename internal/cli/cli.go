@@ -68,6 +68,7 @@ func Execute(ctx context.Context, args []string, out, errOut io.Writer) int {
 	options.BoolVar(&cfg.List, "list", false, "preview mutation candidates without running tests")
 	options.StringVar(&cfg.Shard, "shard", "", "select the zero-based shard K/N")
 	options.StringVar(&cfg.Checkpoint, "checkpoint", "", "resume completed mutations from a campaign journal")
+	options.IntVar(&cfg.Audit, "audit", 0, "compare up to N completed probe mutations with the actual source edits")
 	options.Func("exclude-rule", "skip a mutation rule (repeatable)", func(value string) error {
 		cfg.ExcludeRules = append(cfg.ExcludeRules, value)
 		return nil

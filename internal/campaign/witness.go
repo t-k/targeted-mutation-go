@@ -69,10 +69,10 @@ func sourceWitnessPriority(rule string) int {
 }
 
 func (s *session) verifyWitnesses(ctx context.Context, report *Report, probes []probeJob) {
-	byLocation := make(map[string]probeJob)
+	byID := make(map[string]probeJob)
 	for _, probe := range probes {
 		f := probe.finding
-		byLocation[f.ID] = probe
+		byID[f.ID] = probe
 	}
 	groups := make(map[string][]witnessJob)
 	for i, finding := range report.Findings {
@@ -80,7 +80,7 @@ func (s *session) verifyWitnesses(ctx context.Context, report *Report, probes []
 		if !want || finding.Witness == nil || finding.Witness.Call == "" {
 			continue
 		}
-		probe, ok := byLocation[finding.ID]
+		probe, ok := byID[finding.ID]
 		if !ok {
 			continue
 		}
