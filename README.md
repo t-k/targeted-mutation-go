@@ -368,7 +368,7 @@ Full methodology, peer versions, and raw timing distributions on macOS arm64 (Go
 
 ## Development & formal verification
 
-CI ([.github/workflows/ci.yml](.github/workflows/ci.yml)) runs `go test`, `go vet`, and `go test -race` across Go 1.26 and 1.27 on Ubuntu and macOS (plus self-mutation gating on Ubuntu / Go 1.27), alongside a dedicated Ubuntu formal-verification job for Lean 4, TLC, and PICT:
+CI ([.github/workflows/ci.yml](.github/workflows/ci.yml)) runs `go test` and `go vet` across Go 1.26 and 1.27 on Ubuntu, macOS, and Windows (plus `go test -race` on Ubuntu/macOS, self-mutation gating on Ubuntu / Go 1.27, and `gh actions-lock --verify`), alongside a dedicated Ubuntu formal-verification job for Lean 4, TLC, and PICT:
 
 - **Lean 4** ([verification/lean/Threshold.lean](verification/lean/Threshold.lean)): proves adjacent-threshold distinguishing ranks, observation-extremum sufficiency, two's-complement sign-bit ranking (`x + 2^63`) and overflow-free rank differences, 3-bit comparison masks under operand reversal, bitmask zero-bits, $O(1)$ `prevMaskedStep` / `nextMaskedStep` hole-jumping exactness, and signed/unsigned remainder bounds.
 - **TLA+ / TLC** ([verification/tla/](verification/tla/) & [internal/reporting/formal/](internal/reporting/formal/)): model-checks worker concurrency and activation evidence (`Campaign.tla`), hybrid probe/source fallback and bounded repair retries (`SourceReplay.tla`), crash-safe locked checkpoint journals (`Checkpoint.tla`), isolated test attribution (`Suggestion.tla`), 4-step source witness verification (`SourceWitness.tla`), previous-test comparison (`Weakened.tla`), and atomic baseline publication (`BaselineSnapshot.tla`).
