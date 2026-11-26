@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -201,5 +202,45 @@ func TestSourceEditPICT(t *testing.T) {
 				t.Fatalf("found %q → %q: %v", before, after, found)
 			}
 		})
+	}
+}
+
+func TestSourceParityPreservesLexicalAndTypeSemantics(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "go.mod", "module example.org/edges\n\ngo 1.26.0\n")
+	write(t, dir, "edge.go", `package edges
+//line remapped.go:700
+func compact(a,b int) int { return a+-b }
+func priority(a,b,c int) int { return a-b*c }
+func boxed() any { return 42 }
+type E struct{}
+func (*E) Error() string { return "" }
+func check(e *E) []bool { return []bool{e!=nil} }
+`)
+	path := filepath.Join(dir, "edge.go")
+	scope := Scope{path: {{Start: 3, End: 9}}}
+	pkgs, err := Discover(context.Background(), dir, []string{"."}, "", scope, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[[3]string]bool{
+		{"3", "a+-b", "((a) - (-b))"}:   false,
+		{"4", "a-b*c", "((a) / (b*c))"}: false,
+		{"4", "-", "/"}:                 false,
+		{"5", "42", "0"}:                false,
+		{"8", "e!=nil", "false"}:        false,
+	}
+	for _, file := range pkgs[0].Files {
+		for _, edit := range file.Edits {
+			key := [3]string{strconv.Itoa(edit.Line), edit.Before, edit.After}
+			if _, ok := want[key]; ok {
+				want[key] = true
+			}
+		}
+	}
+	for key, found := range want {
+		if !found {
+			t.Errorf("missing %v", key)
+		}
 	}
 }

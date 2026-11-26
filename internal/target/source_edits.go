@@ -119,7 +119,7 @@ func (e *sourceEdits) inScope(start, end token.Pos) bool {
 	if end > start {
 		end--
 	}
-	return e.scope.Contains(e.file.Path, e.positions.Line(start), e.positions.Line(end))
+	return e.scope.Contains(e.file.Path, e.positions.PositionFor(start, false).Line, e.positions.PositionFor(end, false).Line)
 }
 
 func (e *sourceEdits) text(node ast.Node) string {
@@ -177,7 +177,7 @@ func (e *sourceEdits) binary(n *ast.BinaryExpr, parent ast.Node) {
 			edited.Op = replacement
 			// A standalone type check lacks the enclosing constant declaration's iota.
 			valid := e.pkg.TypesInfo.Types[n].Value != nil || e.check(n.Pos(), &edited)
-			grouped := changesGrouping(n, parent, replacement)
+			grouped := changesGrouping(n, parent, replacement) || e.joinsNextToken(n, replacement)
 			switch {
 			case valid && !grouped:
 				e.operator(n.OpPos, n.Op, replacement)
@@ -198,6 +198,21 @@ func (e *sourceEdits) binary(n *ast.BinaryExpr, parent ast.Node) {
 	if n.Op == token.NEQ && (e.errorAndNil(n.X, n.Y) || e.errorAndNil(n.Y, n.X)) {
 		e.boolean(n, false, "error-check")
 	}
+}
+
+func (e *sourceEdits) joinsNextToken(n *ast.BinaryExpr, replacement token.Token) bool {
+	text := replacement.String()
+	next := e.positions.Offset(n.OpPos) + len(n.Op.String())
+	if next >= len(e.file.Data) {
+		return false
+	}
+	switch [2]byte{text[len(text)-1], e.file.Data[next]} {
+	case [2]byte{'+', '+'}, [2]byte{'-', '-'}, [2]byte{'&', '&'}, [2]byte{'&', '^'},
+		[2]byte{'|', '|'}, [2]byte{'<', '<'}, [2]byte{'>', '>'}, [2]byte{'<', '-'},
+		[2]byte{'/', '*'}, [2]byte{'/', '/'}:
+		return true
+	}
+	return false
 }
 
 func changesGrouping(n *ast.BinaryExpr, parent ast.Node, replacement token.Token) bool {
@@ -363,8 +378,9 @@ func (e *sourceEdits) nameAvailable(pos token.Pos, name string) bool {
 
 func (e *sourceEdits) errorAndNil(err, nilExpr ast.Expr) bool {
 	id, ok := ast.Unparen(nilExpr).(*ast.Ident)
-	return ok && e.builtin(id, "nil") &&
-		types.Identical(e.pkg.TypesInfo.TypeOf(err), types.Universe.Lookup("error").Type())
+	typ := e.pkg.TypesInfo.TypeOf(err)
+	errorInterface := types.Universe.Lookup("error").Type().Underlying().(*types.Interface)
+	return ok && e.builtin(id, "nil") && typ != nil && types.Implements(typ, errorInterface)
 }
 
 func (e *sourceEdits) returns(n *ast.ReturnStmt, ancestors []ast.Node) {
@@ -414,6 +430,16 @@ func (e *sourceEdits) returnValue(expr, typeExpr ast.Expr, typ types.Type) {
 				e.replace(expr, "return-zero", `""`)
 			}
 			return
+		}
+	}
+	if _, boxed := typ.Underlying().(*types.Interface); boxed {
+		if literal, ok := ast.Unparen(expr).(*ast.BasicLit); ok {
+			switch literal.Kind {
+			case token.INT, token.FLOAT:
+				e.replace(expr, "return-zero", "0")
+			case token.STRING:
+				e.replace(expr, "return-zero", `""`)
+			}
 		}
 	}
 	if types.AssignableTo(types.Typ[types.UntypedNil], typ) && e.nameAvailable(expr.Pos(), "nil") {
