@@ -44,6 +44,30 @@ All matching cases below had the same verdict with Go 1.26.10. The applied profi
 | go-mutants 0.1.2 | 3 |
 | gomu 0.3.0 | 14 |
 
+## Full campaign performance
+
+The full campaign harness compares two TMT builds on the same project paths. It rotates the order, takes five measurements after warm-up, and retains a report per run. It checks the identity and verdict of every full finding between builds and cross-checks the source findings against `--source-only`. It can also run gomu on the peer fixture and compare the verdicts of the executable mutants common to both tools.
+
+```sh
+benchmarks/install.sh docs.local/bench/bin
+git worktree add --detach .worktree/full-baseline b425d69
+(cd .worktree/full-baseline && go build -buildvcs=false -o ../../docs.local/bench/bin/full-before ./cmd/targeted-mutation-go)
+go build -buildvcs=false -o docs.local/bench/bin/full-after ./cmd/targeted-mutation-go
+PYTHONDONTWRITEBYTECODE=1 python3 benchmarks/full_compare.py \
+  --before docs.local/bench/bin/full-before --after docs.local/bench/bin/full-after \
+  --gomu docs.local/bench/bin/gomu --output docs.local/bench/full-comparison
+git worktree remove .worktree/full-baseline
+```
+
+The recorded run used macOS arm64, Go 1.26.10 for the fixtures, and four workers. Both TMT builds produced the same 24 findings on the peer fixture and the same 88 findings on the fixture with eight integer comparisons. gomu produced 19 results on the peer fixture. All 14 distinct executable edits from those results matched TMT. [Timing samples](results/full-macos-arm64-go1.26.10.json)
+
+| Fixture | TMT `b425d69` | TMT `9aedc20` | gomu 0.3.0 | TMT source replay calls |
+| --- | ---: | ---: | ---: | ---: |
+| Peer operators | 4.98 s | 3.79 s | 3.94 s | 25 → 13 |
+| Eight integer comparisons | 13.17 s | 1.61 s | | 64 → 0 |
+
+The timings include package discovery, the ordinary suite, any instrumented test builds, and mutant execution. The source replay call count covers separate `go test` invocations for edits, including repair retries. The two tools use different catalogues on the peer fixture.
+
 ## Source queue allocations
 
 ```sh

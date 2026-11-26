@@ -1,0 +1,220 @@
+{
+  "metadata": {
+    "platform": "darwin/arm64",
+    "fixture_go": "go1.26.10",
+    "tmt_build_go": "go1.27.4",
+    "workers": 4,
+    "warm_up_rounds": 1,
+    "measurement_rounds": 5,
+    "before": "b425d69",
+    "after": "9aedc20",
+    "gomu": "0.3.0"
+  },
+  "peer": {
+    "samples": {
+      "before": [
+        {
+          "seconds": 4.632354333000002,
+          "findings": 24,
+          "source_runs": 25,
+          "probe_replays": 0,
+          "killed": 19,
+          "non_viable": 4
+        },
+        {
+          "seconds": 4.977425457999999,
+          "findings": 24,
+          "source_runs": 25,
+          "probe_replays": 0,
+          "killed": 19,
+          "non_viable": 4
+        },
+        {
+          "seconds": 4.794217750000001,
+          "findings": 24,
+          "source_runs": 25,
+          "probe_replays": 0,
+          "killed": 19,
+          "non_viable": 4
+        },
+        {
+          "seconds": 5.155302875000004,
+          "findings": 24,
+          "source_runs": 25,
+          "probe_replays": 0,
+          "killed": 19,
+          "non_viable": 4
+        },
+        {
+          "seconds": 4.995602457999993,
+          "findings": 24,
+          "source_runs": 25,
+          "probe_replays": 0,
+          "killed": 19,
+          "non_viable": 4
+        }
+      ],
+      "after": [
+        {
+          "seconds": 3.5388345,
+          "findings": 24,
+          "source_runs": 13,
+          "probe_replays": 7,
+          "killed": 19,
+          "non_viable": 4
+        },
+        {
+          "seconds": 3.5199462080000004,
+          "findings": 24,
+          "source_runs": 13,
+          "probe_replays": 7,
+          "killed": 19,
+          "non_viable": 4
+        },
+        {
+          "seconds": 3.9310507089999973,
+          "findings": 24,
+          "source_runs": 13,
+          "probe_replays": 7,
+          "killed": 19,
+          "non_viable": 4
+        },
+        {
+          "seconds": 4.1427015830000045,
+          "findings": 24,
+          "source_runs": 13,
+          "probe_replays": 7,
+          "killed": 19,
+          "non_viable": 4
+        },
+        {
+          "seconds": 3.7937572910000057,
+          "findings": 24,
+          "source_runs": 13,
+          "probe_replays": 7,
+          "killed": 19,
+          "non_viable": 4
+        }
+      ],
+      "gomu": [
+        {
+          "seconds": 3.757369082999997,
+          "findings": 19
+        },
+        {
+          "seconds": 3.8458331249999986,
+          "findings": 19
+        },
+        {
+          "seconds": 3.942594290999999,
+          "findings": 19
+        },
+        {
+          "seconds": 4.0903047090000015,
+          "findings": 19
+        },
+        {
+          "seconds": 4.213983083000002,
+          "findings": 19
+        }
+      ]
+    },
+    "median_seconds": {
+      "before": 4.977425457999999,
+      "after": 3.7937572910000057,
+      "gomu": 3.942594290999999
+    }
+  },
+  "integer": {
+    "samples": {
+      "before": [
+        {
+          "seconds": 9.549031,
+          "findings": 88,
+          "source_runs": 64,
+          "probe_replays": 8,
+          "killed": 48,
+          "non_viable": 8
+        },
+        {
+          "seconds": 13.58308991700001,
+          "findings": 88,
+          "source_runs": 64,
+          "probe_replays": 8,
+          "killed": 48,
+          "non_viable": 8
+        },
+        {
+          "seconds": 13.170991833000016,
+          "findings": 88,
+          "source_runs": 64,
+          "probe_replays": 8,
+          "killed": 48,
+          "non_viable": 8
+        },
+        {
+          "seconds": 13.472466459000003,
+          "findings": 88,
+          "source_runs": 64,
+          "probe_replays": 8,
+          "killed": 48,
+          "non_viable": 8
+        },
+        {
+          "seconds": 10.065031667,
+          "findings": 88,
+          "source_runs": 64,
+          "probe_replays": 8,
+          "killed": 48,
+          "non_viable": 8
+        }
+      ],
+      "after": [
+        {
+          "seconds": 0.9263602910000088,
+          "findings": 88,
+          "source_runs": 0,
+          "probe_replays": 48,
+          "killed": 48,
+          "non_viable": 8
+        },
+        {
+          "seconds": 1.6692801670000108,
+          "findings": 88,
+          "source_runs": 0,
+          "probe_replays": 48,
+          "killed": 48,
+          "non_viable": 8
+        },
+        {
+          "seconds": 1.5732590830000106,
+          "findings": 88,
+          "source_runs": 0,
+          "probe_replays": 48,
+          "killed": 48,
+          "non_viable": 8
+        },
+        {
+          "seconds": 1.6796068749999904,
+          "findings": 88,
+          "source_runs": 0,
+          "probe_replays": 48,
+          "killed": 48,
+          "non_viable": 8
+        },
+        {
+          "seconds": 1.6082692500000064,
+          "findings": 88,
+          "source_runs": 0,
+          "probe_replays": 48,
+          "killed": 48,
+          "non_viable": 8
+        }
+      ]
+    },
+    "median_seconds": {
+      "before": 13.170991833000016,
+      "after": 1.6082692500000064
+    }
+  }
+}
