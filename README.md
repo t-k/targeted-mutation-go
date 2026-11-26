@@ -15,7 +15,7 @@ cd /path/to/go/module
 targeted-mutation-go analyze --verify-witnesses ./...
 ```
 
-For a package containing `func free(price int) bool { return price >= 5000 }` and the two tests above, the report includes:
+For a package containing `func free(price int) bool { return price >= 5000 }` and the two tests above, the report includes the following finding.
 
 ```text
 INPUT GAP limits.go:3:42
@@ -25,7 +25,7 @@ INPUT GAP limits.go:3:42
   add a check for free(4999) == false (mutant: true) [verified]
 ```
 
-For PRs, choose a Git base and pass it before the package patterns:
+For PRs, pass the Git base before the package patterns.
 
 ```sh
 base=$(git merge-base HEAD origin/main)
@@ -43,7 +43,7 @@ targeted-mutation-go analyze --since "$base" --undo-changes --full ./...
 | `ASSERTION GAP` | The mutant changed a comparison result in the listed test packages and the same tests still passed. |
 | `SOURCE SURVIVOR` | The selected suite passed against a source-level edit. |
 | `UNTESTED CHANGE` | The selected suite passed after a Git hunk was restored. |
-| `UNREACHED` | No selected test binary observed this comparison. Use `--show-unreached` to list it. |
+| `UNREACHED` | The selected test binaries left this comparison unobserved. Use `--show-unreached` to list it. |
 | `UNSTABLE`, `TIMEOUT`, `BUILD ERROR`, `ERROR` | The campaign could not establish a verdict. |
 
 A witness marked `verified` passed on the original and failed with the mutant applied. A suggested operand can be useful even when the tool cannot derive an end-to-end test call. Automatic witness compilation currently supports direct comparisons of a single integer parameter in a standalone function.
@@ -75,8 +75,8 @@ lean +leanprover/lean4:v4.36.0 verification/lean/Threshold.lean
 tla2tools -workers 2 verification/tla/Campaign.tla
 ```
 
-Lean checks integer ordering, summaries, and distinguishing inputs. TLC checks a finite model of baseline, worker, activation, and cleanup transitions. The Go tests exercise generated PICT combinations and real test binaries. See [benchmarks](benchmarks/README.md) for the measured workloads and reproducible comparison commands.
+Lean checks integer ordering, summaries, and distinguishing inputs. TLC checks a finite model of baseline, worker, activation, and cleanup transitions. The Go tests exercise generated PICT combinations and real test binaries. The measured workloads and reproducible commands are in the [benchmark guide](benchmarks/README.md).
 
-Related implementations: [Rust](https://github.com/t-k/targeted-mutation) and [JavaScript/TypeScript](https://github.com/t-k/targeted-mutation-ts).
+Related implementations include [Rust](https://github.com/t-k/targeted-mutation) and [JavaScript/TypeScript](https://github.com/t-k/targeted-mutation-ts).
 
 Licensed under [Apache 2.0](LICENSE).

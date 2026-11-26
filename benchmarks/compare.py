@@ -130,9 +130,11 @@ def verify(name, payload, sites):
         ]
     else:
         # gomu's default catalogue is timed as a separate workload.
-        if not payload:
-            raise RuntimeError(f"{name} emitted no results")
-        return
+        counts = [
+            m["mutant"]["line"] for m in payload["results"]
+            if m["mutant"]["original"] == ">=" and m["mutant"]["mutated"] == ">"
+            and m["status"] == "SURVIVED"
+        ]
     if sorted(counts) != list(range(3, sites + 3)):
         raise RuntimeError(f"{name} did not produce the expected boundary survivor at every site")
 
