@@ -30,8 +30,9 @@ func (e *sourceEdits) semanticCall(call *ast.CallExpr) {
 	switch fn := expr.(type) {
 	case *ast.Ident:
 		if (fn.Name == "min" || fn.Name == "max") && e.builtin(fn, fn.Name) {
-			// A different constant result may overflow an enclosing conversion.
-			if info.Types[call].Value == nil {
+			// The unary forms are equivalent, and a different constant result
+			// may overflow an enclosing conversion.
+			if len(call.Args) > 1 && info.Types[call].Value == nil {
 				e.swapSemanticName(semanticCallee{name: fn}, otherName(fn.Name, "min", "max"), "min-max")
 			}
 			return
@@ -142,8 +143,9 @@ func (e *sourceEdits) changeReplacementCount(call *ast.CallExpr, callee semantic
 		if len(call.Args) != 4 {
 			return
 		}
-		count := e.pkg.TypesInfo.Types[call.Args[3]].Value
-		if count == nil || !constant.Compare(count, token.EQL, constant.MakeInt64(1)) {
+		// Dropping a constant expression could remove the sole use of an import.
+		count, ok := call.Args[3].(*ast.BasicLit)
+		if !ok || count.Kind != token.INT || !e.isIntegerConstant(count, 1) {
 			return
 		}
 	} else if len(call.Args) != 3 {
@@ -218,6 +220,15 @@ func (e *sourceEdits) scalarLiteral(expr ast.Expr) bool {
 	return false
 }
 
+func (e *sourceEdits) isIntegerConstant(expr ast.Expr, want int64) bool {
+	value := e.pkg.TypesInfo.Types[expr].Value
+	if value == nil {
+		return false
+	}
+	got, exact := constant.Int64Val(constant.ToInt(value))
+	return exact && got == want
+}
+
 func (e *sourceEdits) integerRounding(expr *ast.BinaryExpr) {
 	if e.rawSource || expr.Op != token.QUO {
 		return
@@ -232,6 +243,13 @@ func (e *sourceEdits) integerRounding(expr *ast.BinaryExpr) {
 	}
 	basic, ok := value.Type.Underlying().(*types.Basic)
 	if !ok || basic.Info()&types.IsInteger == 0 {
+		return
+	}
+	// Dividing by ±1 is identity or negation modulo the type width, including
+	// the most-negative signed value divided by -1. A zero product is also
+	// zero after either reorder, and every form still divides by the divisor.
+	if e.isIntegerConstant(expr.Y, 1) || e.isIntegerConstant(expr.Y, -1) ||
+		e.isIntegerConstant(product.X, 0) || e.isIntegerConstant(product.Y, 0) {
 		return
 	}
 	for _, arg := range []ast.Expr{product.X, product.Y, expr.Y} {
@@ -253,11 +271,15 @@ func (e *sourceEdits) integerRounding(expr *ast.BinaryExpr) {
 	alternatives := []struct {
 		expression *ast.BinaryExpr
 		source     string
+		multiplier ast.Expr
 	}{
-		{multiply(divide(product.X, expr.Y), product.Y), "((" + left + " / " + divisor + ") * " + right + ")"},
-		{multiply(product.X, divide(product.Y, expr.Y)), "(" + left + " * (" + right + " / " + divisor + "))"},
+		{multiply(divide(product.X, expr.Y), product.Y), "((" + left + " / " + divisor + ") * " + right + ")", product.Y},
+		{multiply(product.X, divide(product.Y, expr.Y)), "(" + left + " * (" + right + " / " + divisor + "))", product.X},
 	}
 	for _, candidate := range alternatives {
+		if e.isIntegerConstant(candidate.multiplier, 1) {
+			continue
+		}
 		info := &types.Info{Types: make(map[ast.Expr]types.TypeAndValue)}
 		if err := types.CheckExpr(e.pkg.Fset, e.pkg.Types, expr.Pos(), candidate.expression, info); err == nil &&
 			types.Identical(info.TypeOf(candidate.expression), value.Type) {

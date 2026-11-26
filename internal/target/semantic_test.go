@@ -313,3 +313,102 @@ func last(x string) bool { return strings.HasSuffix(x,"AB") }
 		t.Fatalf("semantic rules ran without the full or source-only catalogue")
 	}
 }
+
+func TestSemanticRulesRetainImportReferences(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "go.mod", "module example.org/semantic\n\ngo 1.26.0\n")
+	write(t, dir, "qualified.go", `package semantic
+import ("strings"; clock "time")
+func Qualified(x string) string { return strings.Replace(x, "a", "b", int(clock.Nanosecond)) }
+`)
+	write(t, dir, "dot.go", `package semantic
+import ("strings"; . "time")
+func Dotted(x string) string { return strings.Replace(x, "a", "b", int(Nanosecond)) }
+`)
+	write(t, dir, "shadow.go", `package semantic
+import . "strings"
+func Shadowed(x string) string {
+    ReplaceAll := func(string, string, string) string { return "" }
+    _ = ReplaceAll
+    return Replace(x, "a", "b", 1)
+}
+`)
+	write(t, dir, "slice.go", `package semantic
+import ("slices"; clock "time")
+func Slice(x int) bool { return slices.Contains([]int{0, int(clock.Nanosecond)}, x) }
+`)
+	write(t, dir, "named.go", `package semantic
+import ("net"; "slices")
+func Named(x byte) bool { return slices.Contains(net.IP{1, 2}, x) }
+`)
+	pkgs, err := Discover(context.Background(), dir, []string{"."}, "", nil, Discovery{SourceOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var reduced []string
+	for _, file := range pkgs[0].Files {
+		for _, edit := range file.Edits {
+			switch edit.Kind {
+			case "replacement-count":
+				t.Errorf("count mutation drops an import reference or changes its binding: %+v", edit)
+			case "slice-element-remove":
+				if filepath.Base(edit.File) != "named.go" {
+					t.Errorf("slice mutation drops a constant import reference: %+v", edit)
+				}
+				reduced = append(reduced, edit.After)
+			}
+		}
+	}
+	slices.Sort(reduced)
+	if !slices.Equal(reduced, []string{"net.IP{1}", "net.IP{2}"}) {
+		t.Fatalf("slice substitution must retain its imported type: %q", reduced)
+	}
+}
+
+func TestSemanticRulesOmitProvenIdentities(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "go.mod", "module example.org/semantic\n\ngo 1.26.0\n")
+	write(t, dir, "f.go", `package semantic
+func Min(x int) int { return min(x) }
+func Max(x float64) float64 { return max(x) }
+func DividePositive(a,b int8) int8 { return a*b/1 }
+func DivideNegative(a,b int8) int8 { return a*b/ -1 }
+func ZeroLeft(b,c int8) int8 { return 0*b/c }
+func ZeroRight(a,c int8) int8 { return a*0/c }
+func OneLeft(b,c int8) int8 { return 1*b/c }
+func OneRight(a,c int8) int8 { return a*1/c }
+`)
+	pkgs, err := Discover(context.Background(), dir, []string{"."}, "", nil, Discovery{Full: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var reorders []string
+	for _, file := range pkgs[0].Files {
+		for _, edit := range file.Edits {
+			switch edit.Kind {
+			case "min-max":
+				t.Errorf("unary extrema produce no semantic difference: %+v", edit)
+			case "integer-rounding-order":
+				reorders = append(reorders, edit.After)
+			}
+		}
+	}
+	slices.Sort(reorders)
+	if !slices.Equal(reorders, []string{"((1 / c) * b)", "(a * (1 / c))"}) {
+		t.Fatalf("reordered expressions = %q", reorders)
+	}
+}
+
+func TestRoundingDivisionByUnitWithSignedWrap(t *testing.T) {
+	for _, divisor := range []int8{-1, 1} {
+		for x := -128; x <= 127; x++ {
+			for y := -128; y <= 127; y++ {
+				a, b := int8(x), int8(y)
+				original := (a * b) / divisor
+				if original != (a/divisor)*b || original != a*(b/divisor) {
+					t.Fatalf("reordering changes %d * %d / %d", a, b, divisor)
+				}
+			}
+		}
+	}
+}
