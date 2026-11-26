@@ -13,19 +13,19 @@ import (
 )
 
 type compilerDiagnostic struct {
-	path, message string
-	line, column  int
+	path, message, build string
+	line, column         int
 }
 
 var diagnosticPattern = regexp.MustCompile(`^(.+?):(\d+):(\d+): (.+)$`)
 
-func parseCompilerOutput(output string) []compilerDiagnostic {
+func parseCompilerOutput(build, output string) []compilerDiagnostic {
 	var diagnostics []compilerDiagnostic
 	for text := range strings.SplitSeq(output, "\n") {
 		if m := diagnosticPattern.FindStringSubmatch(text); m != nil {
 			line, _ := strconv.Atoi(m[2])
 			column, _ := strconv.Atoi(m[3])
-			diagnostics = append(diagnostics, compilerDiagnostic{path: m[1], line: line, column: column, message: m[4]})
+			diagnostics = append(diagnostics, compilerDiagnostic{path: m[1], line: line, column: column, message: m[4], build: build})
 		}
 	}
 	return diagnostics
@@ -36,6 +36,11 @@ func candidateDiagnostics(run commandResult, workingDir, overlayFile string) []c
 		return nil
 	}
 	diagnostics := slices.Clone(run.diagnostics)
+	for build := range run.failedBuilds {
+		if build == "" || !slices.ContainsFunc(diagnostics, func(d compilerDiagnostic) bool { return d.build == build }) {
+			return nil
+		}
+	}
 	for i := range diagnostics {
 		d := &diagnostics[i]
 		if !filepath.IsAbs(d.path) {
@@ -122,7 +127,11 @@ func findUnused(file *ast.File, positions *token.File, diag compilerDiagnostic) 
 			}
 			return sourcePatch{imported.Name.Pos(), imported.Name.End(), "_"}, true
 		}
-		if diag.message == expected {
+		// An implicit import can name a package whose declared name differs
+		// from the final path component, including versioned module imports.
+		implicit, ok := strings.CutPrefix(diag.message, prefix+" as ")
+		name, unused := strings.CutSuffix(implicit, " and not used")
+		if diag.message == expected || ok && unused && token.IsIdentifier(name) {
 			return sourcePatch{imported.Path.Pos(), imported.Path.Pos(), "_ "}, true
 		}
 		return sourcePatch{}, false

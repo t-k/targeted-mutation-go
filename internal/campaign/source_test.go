@@ -99,3 +99,25 @@ func TestCompilerDiagnosticsSurviveLargeOutput(t *testing.T) {
 		t.Fatalf("missing diagnostic: %+v", output.diagnostics)
 	}
 }
+
+func TestUnusedVersionedImport(t *testing.T) {
+	const path = "/tmp/overlay/source-0.go"
+	data := []byte("package p\nimport \"math/rand/v2\"\nfunc f() int { return 0 }\n")
+	diag := compilerDiagnostic{path: path, line: 2, column: 8, message: `"math/rand/v2" imported as rand and not used`}
+	if repair := repairUnused(data, path, []compilerDiagnostic{diag}); !strings.Contains(string(repair), `import _ "math/rand/v2"`) {
+		t.Fatalf("implicit import should be retained for initialization: %s", repair)
+	}
+}
+
+func TestCandidateDiagnosticsRejectUnrelatedFailedBuild(t *testing.T) {
+	var output commandOutput
+	_, _ = output.Write([]byte(`{"ImportPath":"example.org/edited","Action":"build-output","Output":"/tmp/overlay/source-0.go:4:6: missing return\n"}
+{"ImportPath":"example.org/edited","Action":"build-fail"}
+{"ImportPath":"example.org/other","Action":"build-output","Output":"link: running cc failed\n"}
+{"ImportPath":"example.org/other","Action":"build-fail"}
+`))
+	run := commandResult{diagnostics: output.diagnostics, failedBuilds: output.failedBuilds}
+	if diagnostics := candidateDiagnostics(run, "/tmp", "/tmp/overlay/source-0.go"); len(diagnostics) != 0 {
+		t.Fatalf("candidate errors masked an unrelated build failure: %+v", diagnostics)
+	}
+}

@@ -30,6 +30,7 @@ type commandResult struct {
 	packages        map[string]string
 	diagnostics     []compilerDiagnostic
 	moreDiagnostics bool
+	failedBuilds    map[string]bool
 }
 
 func environment(ctx context.Context, dir string) (goEnvironment, error) {
@@ -121,7 +122,7 @@ func runCommand(ctx context.Context, limit time.Duration, dir string, env []stri
 	err := cmd.Run()
 	output.finish()
 	result := commandResult{detail: strings.TrimSpace(output.tail.String()), failed: output.failed, tests: output.tests, events: output.events, inventory: output.inventory, packages: output.packages,
-		diagnostics: output.diagnostics, moreDiagnostics: output.moreDiagnostics}
+		diagnostics: output.diagnostics, moreDiagnostics: output.moreDiagnostics, failedBuilds: output.failedBuilds}
 	switch {
 	case ctx.Err() == context.DeadlineExceeded:
 		result.kind = "timeout"
@@ -161,6 +162,7 @@ type commandOutput struct {
 	timedOut        bool
 	diagnostics     []compilerDiagnostic
 	moreDiagnostics bool
+	failedBuilds    map[string]bool
 }
 
 func (o *commandOutput) Write(data []byte) (int, error) {
@@ -213,13 +215,13 @@ func (o *commandOutput) finish() {
 		return
 	}
 	var event struct {
-		Action, Test, Package, FailedBuild, Output string
+		Action, Test, Package, ImportPath, FailedBuild, Output string
 	}
 	if json.Unmarshal([]byte(line), &event) != nil {
 		return
 	}
 	if event.Action == "build-output" {
-		for _, diagnostic := range parseCompilerOutput(event.Output) {
+		for _, diagnostic := range parseCompilerOutput(event.ImportPath, event.Output) {
 			if slices.Contains(o.diagnostics, diagnostic) {
 				continue
 			}
@@ -232,6 +234,14 @@ func (o *commandOutput) finish() {
 	}
 	if event.FailedBuild != "" || event.Action == "build-fail" {
 		o.buildFailed = true
+		key := event.FailedBuild
+		if key == "" {
+			key = event.ImportPath
+		}
+		if o.failedBuilds == nil {
+			o.failedBuilds = make(map[string]bool)
+		}
+		o.failedBuilds[key] = true
 	}
 	if event.Test == "" && (event.Action == "pass" || event.Action == "skip" || event.Action == "fail") {
 		if o.packages == nil {

@@ -176,7 +176,7 @@ func (e *sourceEdits) binary(n *ast.BinaryExpr, parent ast.Node) {
 			edited.Op = replacement
 			// A standalone type check lacks the enclosing constant declaration's iota.
 			valid := e.pkg.TypesInfo.Types[n].Value != nil || e.check(n.Pos(), &edited)
-			grouped := changesGrouping(n, parent, replacement) || e.joinsNextToken(n, replacement)
+			grouped := changesGrouping(n, parent, replacement) || e.joinsToken(n.OpPos, n.Op, replacement)
 			switch {
 			case valid && !grouped:
 				e.operator(n.OpPos, n.Op, replacement)
@@ -199,13 +199,16 @@ func (e *sourceEdits) binary(n *ast.BinaryExpr, parent ast.Node) {
 	}
 }
 
-func (e *sourceEdits) joinsNextToken(n *ast.BinaryExpr, replacement token.Token) bool {
+func (e *sourceEdits) joinsToken(pos token.Pos, original, replacement token.Token) bool {
 	text := replacement.String()
-	next := e.positions.Offset(n.OpPos) + len(n.Op.String())
-	if next >= len(e.file.Data) {
-		return false
-	}
-	switch [2]byte{text[len(text)-1], e.file.Data[next]} {
+	start := e.positions.Offset(pos)
+	end := start + len(original.String())
+	return start > 0 && joinsOperatorBytes(e.file.Data[start-1], text[0]) ||
+		end < len(e.file.Data) && joinsOperatorBytes(text[len(text)-1], e.file.Data[end])
+}
+
+func joinsOperatorBytes(first, second byte) bool {
+	switch [2]byte{first, second} {
 	case [2]byte{'+', '+'}, [2]byte{'-', '-'}, [2]byte{'&', '&'}, [2]byte{'&', '^'},
 		[2]byte{'|', '|'}, [2]byte{'<', '<'}, [2]byte{'>', '>'}, [2]byte{'<', '-'},
 		[2]byte{'/', '*'}, [2]byte{'/', '/'}:
@@ -237,12 +240,24 @@ func (e *sourceEdits) unary(n *ast.UnaryExpr) {
 		// Keep grouping when the removed negation enclosed a comparison.
 		e.replace(n, "remove-not", e.text(n.X))
 	case token.ADD, token.SUB:
-		e.swap(n.OpPos, n.Op, token.ADD, token.SUB)
+		replacement := token.SUB
+		if n.Op == token.SUB {
+			replacement = token.ADD
+		}
+		if e.joinsToken(n.OpPos, n.Op, replacement) {
+			e.add(n.OpPos, n.OpPos+1, n.OpPos, "source-operator", " "+replacement.String()+" ")
+		} else {
+			e.operator(n.OpPos, n.Op, replacement)
+		}
 	case token.XOR:
 		edited := *n
 		edited.Op = token.AND
 		if e.check(n.Pos(), &edited) {
-			e.operator(n.OpPos, n.Op, token.AND)
+			if e.joinsToken(n.OpPos, n.Op, token.AND) {
+				e.add(n.OpPos, n.OpPos+1, n.OpPos, "source-operator", " & ")
+			} else {
+				e.operator(n.OpPos, n.Op, token.AND)
+			}
 		}
 	}
 }

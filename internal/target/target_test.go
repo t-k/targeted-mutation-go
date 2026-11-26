@@ -217,6 +217,7 @@ func boxed() any { return 42 }
 type E struct{}
 func (*E) Error() string { return "" }
 func check(e *E) []bool { return []bool{e!=nil} }
+func sign(x int) int { return -+x }
 `)
 	path := filepath.Join(dir, "edge.go")
 	scope := Scope{path: {{Start: 3, End: 9}}}
@@ -229,6 +230,7 @@ func check(e *E) []bool { return []bool{e!=nil} }
 		{"4", "a-b*c", "((a) / (b*c))"}: false,
 		{"4", "-", "/"}:                 false,
 		{"5", "42", "0"}:                false,
+		{"9", "-", " + "}:               false,
 		{"8", "e!=nil", "false"}:        false,
 	}
 	for _, file := range pkgs[0].Files {
