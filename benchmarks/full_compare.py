@@ -12,6 +12,9 @@ import tempfile
 from compare import make_fixture, run
 from peer_parity import compare_verdicts
 
+_BOUNDARY_OPS = {"<": "<=", "<=": "<", ">": ">=", ">=": ">"}
+_NEGATION_OPS = {"<": ">=", "<=": ">", ">": "<=", ">=": "<", "==": "!=", "!=": "=="}
+
 
 def findings(report):
     result = {}
@@ -84,12 +87,21 @@ def measure(args):
                 if before != after:
                     raise RuntimeError(f"full findings differ for {fixture}: {before.items() ^ after.items()}")
                 mismatches = {key: (verdict, oracle.get(key)) for key, verdict in after.items()
-                              if key[3] not in {"boundary", "negation", "threshold"} and verdict != oracle.get(key)}
+                              if key[3] not in {"boundary", "negation", "threshold", "margin"} and verdict != oracle.get(key)}
                 if mismatches:
                     raise RuntimeError(f"source-only verdicts disagree for {fixture}: {mismatches}")
-                missing_steps = {key for key in oracle if key[3] == "integer-step" and key not in after}
-                if missing_steps:
-                    raise RuntimeError(f"full catalogue omitted integer steps for {fixture}: {missing_steps}")
+                after_rules = {(key[0], key[1], key[2], key[3]) for key in after}
+                missing_edits = {
+                    key for key in oracle
+                    if key not in after and not (
+                        key[3] == "source-operator" and (
+                            (key[0], key[1], key[2], "boundary") in after_rules and _BOUNDARY_OPS.get(key[4]) == key[5]
+                            or (key[0], key[1], key[2], "negation") in after_rules and _NEGATION_OPS.get(key[4]) == key[5]
+                        )
+                    )
+                }
+                if missing_edits:
+                    raise RuntimeError(f"full catalogue omitted source edits for {fixture}: {missing_edits}")
                 if "gomu" in reports:
                     compare_verdicts({"tmt": reports["after"], "gomu": reports["gomu"]})
 

@@ -158,7 +158,14 @@ func (e *sourceEdits) add(start, end, anchor token.Pos, kind, replacement string
 	}
 	e.added[key] = true
 	pos := e.positions.PositionFor(anchor, false)
+	startLine := e.positions.PositionFor(start, false).Line
+	endPos := end
+	if endPos > start {
+		endPos--
+	}
+	endLine := e.positions.PositionFor(endPos, false).Line
 	e.file.Edits = append(e.file.Edits, Edit{File: e.file.Path, Line: pos.Line, Column: pos.Column,
+		StartLine: startLine, EndLine: endLine,
 		Start: from, End: to, Before: original, After: replacement, Kind: kind})
 	return &e.file.Edits[len(e.file.Edits)-1]
 }
@@ -399,7 +406,7 @@ func (e *sourceEdits) condition(expr ast.Expr) {
 	e.boolean(expr, false, "condition-constant")
 	e.boolean(expr, true, "condition-constant")
 	if edit := e.replace(expr, "condition-negation", "!("+e.text(expr)+")"); edit != nil {
-		if site := e.comparison(expr); site != nil {
+		if site := e.comparison(expr); site != nil && (!site.Float || site.Op == analysis.EQ || site.Op == analysis.NE) {
 			edit.Site, edit.Operator = site, site.Op.Negate()
 		}
 	}
@@ -419,6 +426,9 @@ func (e *sourceEdits) boolean(node ast.Node, value bool, kind string) {
 			current.Kind() == constant.Bool && constant.BoolVal(current) == value {
 			return
 		}
+	}
+	if text[0] != '(' && followsIdentifierByte(e.file.Data, e.positions.Offset(node.Pos())) {
+		text = "(" + text + ")"
 	}
 	edit := e.replace(node, kind, text)
 	if expr, ok := node.(ast.Expr); edit != nil && ok && (kind == "condition-constant" || kind == "return-boolean") {

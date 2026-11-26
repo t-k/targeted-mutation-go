@@ -31,7 +31,9 @@ type commandResult struct {
 	packages        map[string]string
 	diagnostics     []compilerDiagnostic
 	moreDiagnostics bool
-	failedBuilds    map[string]bool
+	failedBuilds     map[string]bool
+	elapsed          time.Duration
+	deadlineExceeded bool
 }
 
 func environment(ctx context.Context, dir string) (goEnvironment, error) {
@@ -39,6 +41,7 @@ func environment(ctx context.Context, dir string) (goEnvironment, error) {
 	cmd.Dir = dir
 	configureProcess(cmd)
 	out, err := cmd.Output()
+	cleanupProcess(cmd)
 	var env goEnvironment
 	if err != nil {
 		return env, fmt.Errorf("go env: %w", err)
@@ -120,12 +123,19 @@ func runCommand(ctx context.Context, limit time.Duration, dir string, env []stri
 	output := commandOutput{direct: filepath.IsAbs(path)}
 	cmd.Stdout, cmd.Stderr = &output, &output
 	configureProcess(cmd)
+	start := time.Now()
 	err := cmd.Run()
+	elapsed := time.Since(start)
+	cleanupProcess(cmd)
+	if errors.Is(err, exec.ErrWaitDelay) && ctx.Err() == nil && cmd.ProcessState != nil && cmd.ProcessState.Success() {
+		err = nil
+	}
 	output.finish()
+	deadlineExceeded := ctx.Err() == context.DeadlineExceeded
 	result := commandResult{detail: strings.TrimSpace(output.tail.String()), failed: output.failed, tests: output.tests, events: output.events, inventory: output.inventory, packages: output.packages,
-		diagnostics: output.diagnostics, moreDiagnostics: output.moreDiagnostics, failedBuilds: output.failedBuilds}
+		diagnostics: output.diagnostics, moreDiagnostics: output.moreDiagnostics, failedBuilds: output.failedBuilds, elapsed: elapsed, deadlineExceeded: deadlineExceeded}
 	switch {
-	case ctx.Err() == context.DeadlineExceeded:
+	case deadlineExceeded:
 		result.kind = "timeout"
 	case ctx.Err() != nil:
 		result.kind = "cancelled"
@@ -268,7 +278,7 @@ func (o *commandOutput) finish() {
 }
 
 func (o *commandOutput) recordBinary(line string) {
-	if strings.HasPrefix(line, "panic: test timed out") {
+	if strings.HasPrefix(line, "panic: test timed out after ") {
 		o.timedOut = true
 		return
 	}

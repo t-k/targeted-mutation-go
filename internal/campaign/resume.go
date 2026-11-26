@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"strings"
 
 	"github.com/t-k/targeted-mutation-go/internal/analysis"
 	"github.com/t-k/targeted-mutation-go/internal/checkpoint"
@@ -50,8 +51,21 @@ func (s *session) campaignFingerprint(ctx context.Context, journalPath string) (
 		}
 		writeHash(state, string(revision))
 	}
+	workspace := cfg.Dir
+	if filepath.IsAbs(s.env.GOWORK) {
+		workspace = filepath.Dir(s.env.GOWORK)
+	} else if filepath.IsAbs(s.env.GOMOD) && s.env.GOMOD != os.DevNull {
+		workspace = filepath.Dir(s.env.GOMOD)
+	}
+	realWorkspace := workspace
+	if resolved, err := filepath.EvalSymlinks(workspace); err == nil {
+		realWorkspace = resolved
+	}
 	seen := make(map[string]bool)
-	addFile := func(path string) error {
+	rootSeen := make(map[string]bool)
+	var addFile func(string) error
+	var addTree func(string) error
+	addFile = func(path string) error {
 		if seen[path] || path == journalPath {
 			return nil
 		}
@@ -59,7 +73,18 @@ func (s *session) campaignFingerprint(ctx context.Context, journalPath string) (
 			return err
 		}
 		seen[path] = true
-		return hashFile(state, path)
+		return hashFile(state, path, realWorkspace, addTree)
+	}
+	addTree = func(root string) error {
+		canonical := filepath.Clean(root)
+		if resolved, err := filepath.EvalSymlinks(root); err == nil {
+			canonical = resolved
+		}
+		if rootSeen[canonical] {
+			return nil
+		}
+		rootSeen[canonical] = true
+		return hashTree(ctx, canonical, addFile)
 	}
 	tool, err := os.Executable()
 	if err != nil {
@@ -67,20 +92,6 @@ func (s *session) campaignFingerprint(ctx context.Context, journalPath string) (
 	}
 	if err := addFile(tool); err != nil {
 		return "", err
-	}
-	workspace := cfg.Dir
-	if filepath.IsAbs(s.env.GOWORK) {
-		workspace = filepath.Dir(s.env.GOWORK)
-	} else if filepath.IsAbs(s.env.GOMOD) && s.env.GOMOD != os.DevNull {
-		workspace = filepath.Dir(s.env.GOMOD)
-	}
-	rootSeen := make(map[string]bool)
-	addTree := func(root string) error {
-		if rootSeen[root] {
-			return nil
-		}
-		rootSeen[root] = true
-		return hashTree(root, addFile)
 	}
 	if err := addTree(workspace); err != nil {
 		return "", err
@@ -91,15 +102,19 @@ func (s *session) campaignFingerprint(ctx context.Context, journalPath string) (
 	return hex.EncodeToString(state.Sum(nil)), nil
 }
 
-func hashTree(root string, addFile func(string) error) error {
+func hashTree(ctx context.Context, root string, addFile func(string) error) error {
 	return filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
-		if entry.Name() == ".git" || entry.IsDir() && entry.Name() == ".worktree" {
-			if entry.IsDir() {
-				return filepath.SkipDir
-			}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		name := entry.Name()
+		if entry.IsDir() && (name == ".git" || name == ".worktree" || name == "node_modules" || name == "docs.local") {
+			return filepath.SkipDir
+		}
+		if name == ".git" {
 			return nil
 		}
 		if entry.IsDir() {
@@ -116,6 +131,7 @@ func (s *session) fingerprintDependencies(ctx context.Context, addFile, addTree 
 	cmd.Env, cmd.Dir = cleanEnv(), s.cfg.Dir
 	configureProcess(cmd)
 	out, err := cmd.Output()
+	cleanupProcess(cmd)
 	if err != nil {
 		return fmt.Errorf("go list dependency files: %w", err)
 	}
@@ -173,19 +189,74 @@ func (s *session) fingerprintDependencies(ctx context.Context, addFile, addTree 
 	return nil
 }
 
-func hashFile(state hash.Hash, path string) error {
-	info, err := os.Stat(path)
+func hashFile(state hash.Hash, path, realWorkspace string, addTree func(string) error) error {
+	linfo, err := os.Lstat(path)
 	if err != nil {
 		return err
 	}
-	if !info.Mode().IsRegular() {
-		return fmt.Errorf("checkpoint input is not a regular file: %s", path)
+	if linfo.Mode()&os.ModeSymlink != 0 {
+		target, err := os.Readlink(path)
+		if err != nil {
+			return err
+		}
+		writeHash(state, "symlink")
+		writeHash(state, path)
+		writeHash(state, target)
+		info, err := os.Stat(path)
+		if err != nil {
+			return nil
+		}
+		if info.IsDir() {
+			if realDir, evalErr := filepath.EvalSymlinks(path); evalErr == nil {
+				if isStrictAncestorDir(realDir, realWorkspace) {
+					return fmt.Errorf("directory symlink escapes above workspace: %s", path)
+				}
+				return addTree(realDir)
+			}
+			return nil
+		}
+		if !info.Mode().IsRegular() {
+			return nil
+		}
+		return hashRegularFile(state, path)
 	}
+	if !linfo.Mode().IsRegular() {
+		writeHash(state, "special")
+		writeHash(state, path)
+		writeHash(state, linfo.Mode().String())
+		return nil
+	}
+	return hashRegularFile(state, path)
+}
+
+func isStrictAncestorDir(ancestor, child string) bool {
+	if ancestor == "" || child == "" {
+		return false
+	}
+	rel, err := filepath.Rel(ancestor, child)
+	if err != nil {
+		return false
+	}
+	clean := filepath.Clean(rel)
+	return filepath.IsLocal(clean) && clean != "."
+}
+
+func hashRegularFile(state hash.Hash, path string) error {
 	file, err := os.Open(path)
 	if err != nil {
 		return err
 	}
 	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return err
+	}
+	if !info.Mode().IsRegular() {
+		writeHash(state, "special")
+		writeHash(state, path)
+		writeHash(state, info.Mode().String())
+		return nil
+	}
 	contents := sha256.New()
 	if _, err := io.Copy(contents, file); err != nil {
 		return err
@@ -197,6 +268,19 @@ func hashFile(state hash.Hash, path string) error {
 }
 
 func writeHash(state hash.Hash, field string) { fmt.Fprintf(state, "%d:%s", len(field), field) }
+
+func canonicalBaselineKey(packages map[string]string, inventory map[string][]string) string {
+	var sorted map[string][]string
+	if inventory != nil {
+		sorted = make(map[string][]string, len(inventory))
+		for pkg, events := range inventory {
+			cloned := slices.Clone(events)
+			slices.Sort(cloned)
+			sorted[pkg] = cloned
+		}
+	}
+	return stableHash(packages, sorted)
+}
 
 func stableHash(values ...any) string {
 	data, err := json.Marshal(values)
@@ -220,13 +304,14 @@ func (s *session) cachedEdit(f Finding, site *target.Site, reached []*consumer, 
 		for _, bin := range reached {
 			trace = append(trace, observation{Package: bin.pkg, Summary: bin.seen[site.ID]})
 		}
+		slices.SortFunc(trace, func(a, b observation) int { return strings.Compare(a.Package, b.Package) })
 	}
 	key := stableHash(f.ID, s.baselineKey, trace)
-	if saved, ok := s.journal.Get(key); ok && saved.ID == f.ID && checkpointVerdict(saved.Status) {
+	if saved, ok := s.journal.Get(key); ok && saved.ID == f.ID && checkpointVerdict(saved.Status) && saved.Detail != "killed by timeout" {
 		return sourceResult{jobResult: jobResult{finding: saved}, resumed: true}
 	}
 	result := run()
-	if result.err == nil && checkpointVerdict(result.finding.Status) {
+	if result.err == nil && checkpointVerdict(result.finding.Status) && !result.timedOutKilled && result.finding.Detail != "killed by timeout" {
 		result.err = s.journal.Put(key, result.finding)
 	}
 	return result

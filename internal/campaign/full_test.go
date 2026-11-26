@@ -122,7 +122,7 @@ func TestFullComparisonRoutesMatchSourceSemantics(t *testing.T) {
 					signature, expr, args = "(x Word)", `"b" == x`, strconv.Quote(string(rune('b'-order)))
 					expected.original, expected.mutant = "==", "<"
 				case "float":
-					signature, reusable = "(x, y float64)", false
+					signature = "(x, y float64)"
 				case "nested-bool":
 					signature, expr, args = "(x, y int, ok bool)", "x < y == ok", "1, 2, true"
 					expected.original, expected.mutant = "==", "!="
@@ -144,7 +144,7 @@ func TestFullComparisonRoutesMatchSourceSemantics(t *testing.T) {
 				if reusable && mode != "source-only" {
 					expected.unreached = fields[1] == "unreached"
 					switch {
-					case fields[1] == "unreached" && mode == "verified":
+					case fields[1] == "unreached":
 					case expected.status == "killed" || mode == "verified":
 						expected.evidence = "replayed"
 					default:

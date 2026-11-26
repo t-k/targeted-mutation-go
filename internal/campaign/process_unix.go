@@ -21,3 +21,17 @@ func configureProcess(cmd *exec.Cmd) {
 		return err
 	}
 }
+
+func cleanupProcess(cmd *exec.Cmd) {
+	if cmd.Process == nil || cmd.Process.Pid <= 0 {
+		return
+	}
+	pid := cmd.Process.Pid
+	_ = syscall.Kill(-pid, syscall.SIGKILL)
+	for range 25 {
+		if errors.Is(syscall.Kill(-pid, 0), syscall.ESRCH) {
+			return
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+}

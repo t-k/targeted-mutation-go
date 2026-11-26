@@ -19,6 +19,10 @@ mutants = {
         'candidates = append(candidates, Candidate{Kind: "negation", Op: op.Negate(), Pivot: pivot})',
         "",
     ),
+    "masked hole step": (
+        "return (x & ^(lowMask | bit)) | (^forbidden & lowMask)",
+        "return x & ^(lowMask | bit)",
+    ),
 }
 
 for name, (before, after) in mutants.items():

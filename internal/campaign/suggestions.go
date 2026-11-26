@@ -54,28 +54,75 @@ func (s *session) suggestProbeAssertion(ctx context.Context, f *Finding, job pro
 		if !ok || base.kind != "passed" || outside.Flags != 0 || len(base.tests) != 0 {
 			continue
 		}
+		// parentStatus: 0 = unchecked, 1 = clean, 2 = setup infected or unconfirmed
+		parentStatus := make(map[string]uint8)
 		for _, name := range leafTests(bin.tests) {
 			if trials == maxTrials || ctx.Err() != nil {
 				return
 			}
+			skipLeaf := false
+			for idx := strings.IndexByte(name, '/'); idx >= 0; {
+				ancestor := name[:idx]
+				state := parentStatus[ancestor]
+				if state == 0 {
+					trials++
+					parentSetupPattern := exactTestPattern(ancestor) + "/^$"
+					parentBase, parentSeen, parentOK := s.observeTest(ctx, bin, job.site.ID, parentSetupPattern, "")
+					if !parentOK || parentBase.kind != "passed" {
+						state = 2
+					} else if job.candidate.Infects(job.site.Op, parentSeen) {
+						state = 2
+						if trials == maxTrials || ctx.Err() != nil {
+							return
+						}
+						trials++
+						s.recordSuggestedAssertion(ctx, f, bin, job, ancestor)
+					} else {
+						state = 1
+					}
+					parentStatus[ancestor] = state
+				}
+				if state == 2 {
+					skipLeaf = true
+					break
+				}
+				if trials == maxTrials || ctx.Err() != nil {
+					return
+				}
+				next := strings.IndexByte(name[idx+1:], '/')
+				if next < 0 {
+					break
+				}
+				idx += 1 + next
+			}
+			if skipLeaf || trials == maxTrials || ctx.Err() != nil {
+				if trials == maxTrials || ctx.Err() != nil {
+					return
+				}
+				continue
+			}
 			trials++
-			pattern := exactTestPattern(name)
-			original, seen, ok := s.observeTest(ctx, bin, job.site.ID, pattern, "")
-			if !ok || original.kind != "passed" || !slices.Contains(original.events, "pass:"+name) ||
-				!job.candidate.Infects(job.site.Op, seen) {
-				continue
-			}
-			mutated, activated, ok := s.observeTest(ctx, bin, job.site.ID, pattern, selector(job.site, job.candidate))
-			if !ok || mutated.kind != "passed" || activated.Flags&24 != 24 || !sameInventory(original.events, mutated.events) {
-				continue
-			}
-			if !slices.Contains(f.Tests, name) {
-				f.Tests = append(f.Tests, name)
-			}
-			if f.Witness == nil && job.site.Callable != "" && job.site.Domain != nil {
-				f.Witness = observedWitness(job, seen)
-			}
+			s.recordSuggestedAssertion(ctx, f, bin, job, name)
 		}
+	}
+}
+
+func (s *session) recordSuggestedAssertion(ctx context.Context, f *Finding, bin *consumer, job probeJob, name string) {
+	pattern := exactTestPattern(name)
+	original, seen, ok := s.observeTest(ctx, bin, job.site.ID, pattern, "")
+	if !ok || original.kind != "passed" || !slices.Contains(original.events, "pass:"+name) ||
+		!job.candidate.Infects(job.site.Op, seen) {
+		return
+	}
+	mutated, activated, ok := s.observeTest(ctx, bin, job.site.ID, pattern, selector(job.site, job.candidate))
+	if !ok || mutated.kind != "passed" || activated.Flags&24 != 24 || !sameInventory(original.events, mutated.events) {
+		return
+	}
+	if !slices.Contains(f.Tests, name) {
+		f.Tests = append(f.Tests, name)
+	}
+	if f.Witness == nil && job.site.Callable != "" && job.site.Domain != nil {
+		f.Witness = observedWitness(job, seen)
 	}
 }
 

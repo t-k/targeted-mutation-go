@@ -31,6 +31,7 @@ const sourceWitnessEnvironment = "TMT_GO_SOURCE_WITNESS_OUTPUT"
 type sourceWitnessTrial struct {
 	test, file, marker string
 	pkg                target.Package
+	idents             shadowedIdents
 }
 
 func (s *session) sourceWitness(ctx context.Context, job sourceJob) (*SourceWitness, error) {
@@ -48,6 +49,7 @@ func (s *session) sourceWitness(ctx context.Context, job sourceJob) (*SourceWitn
 	if trial.pkg.Path == "" {
 		return nil, nil
 	}
+	trial.idents = packageShadowedIdents(trial.pkg.Dir, job.source)
 	dir, err := os.MkdirTemp(s.scratch, "source-witness-")
 	if err != nil {
 		return nil, err
@@ -135,7 +137,11 @@ func (s *session) runSourceWitness(ctx context.Context, dir string, trial source
 	if err != nil {
 		return commandResult{}, nil, err
 	}
-	bin := consumer{pkg: trial.pkg.Path, dir: trial.pkg.Dir, binary: filepath.Join(runDir, "witness.test")}
+	execDir, err := os.MkdirTemp(runDir, "cwd-")
+	if err != nil {
+		return commandResult{}, nil, err
+	}
+	bin := consumer{pkg: trial.pkg.Path, dir: execDir, binary: filepath.Join(runDir, "witness.test")}
 	if err := s.build(ctx, overlay, &bin, 1); err != nil {
 		// A source candidate or the additional test may be unbuildable.
 		return commandResult{}, nil, ctx.Err()
@@ -143,13 +149,25 @@ func (s *session) runSourceWitness(ctx context.Context, dir string, trial source
 	output := filepath.Join(runDir, "observed")
 	env := cleanEnv("PATH="+filepath.Join(s.env.GOROOT, "bin")+string(os.PathListSeparator)+os.Getenv("PATH"),
 		sourceWitnessEnvironment+"="+output)
-	command := runCommand(ctx, s.cfg.Timeout, bin.dir, env, bin.binary,
+	command := runCommand(ctx, s.cfg.Timeout, execDir, env, bin.binary,
 		"-test.v=test2json", "-test.timeout="+s.cfg.Timeout.String(), "-test.run=^"+trial.test+"$")
 	if err := ctx.Err(); err != nil {
 		return command, nil, err
 	}
 	data, err := readSourceWitnessOutput(output)
 	return command, data, err
+}
+
+func (trial sourceWitnessTrial) expectedExpr(original string) string {
+	if trial.idents.hasBool {
+		switch original {
+		case "true":
+			return "(0 == 0)"
+		case "false":
+			return "(0 != 0)"
+		}
+	}
+	return original
 }
 
 func readSourceWitnessOutput(path string) ([]byte, error) {
@@ -178,6 +196,7 @@ func readSourceWitnessOutput(path string) ([]byte, error) {
 
 func (trial sourceWitnessTrial) collector(calls []string) string {
 	var body strings.Builder
+	param := "tmt" + trial.test + "T"
 	fmt.Fprintf(&body, "package %s\n", trial.pkg.Name)
 	body.WriteString(`import (
 	tmtWitnessJSON "encoding/json"
@@ -188,22 +207,22 @@ func (trial sourceWitnessTrial) collector(calls []string) string {
 	tmtWitnessTesting "testing"
 )
 `)
-	fmt.Fprintf(&body, "func %s(t *tmtWitnessTesting.T) {\n", trial.test)
-	fmt.Fprintf(&body, `capture := func(call func() interface{}) (result string) {
+	fmt.Fprintf(&body, "func %s(%s *tmtWitnessTesting.T) {\n", trial.test, param)
+	fmt.Fprintf(&body, `tmtCapture := func(tmtCall func() interface{}) (tmtResult string) {
 	defer func() { _ = recover() }()
-	return %s(call())
+	return %s(tmtCall())
 }
 `, trial.literalName())
-	body.WriteString("values := []string{\n")
+	body.WriteString("tmtValues := []string{\n")
 	for _, call := range calls {
-		fmt.Fprintf(&body, "capture(func() interface{} { return %s }),\n", call)
+		fmt.Fprintf(&body, "tmtCapture(func() interface{} { return %s }),\n", call)
 	}
 	fmt.Fprintf(&body, `}
-data, err := tmtWitnessJSON.Marshal(values)
-if err != nil { t.Fatal(err) }
-if err := tmtWitnessOS.WriteFile(tmtWitnessOS.Getenv(%q), data, 0600); err != nil { t.Fatal(err) }
+tmtData, tmtErr := tmtWitnessJSON.Marshal(tmtValues)
+if tmtErr != nil { %s.Fatal(tmtErr) }
+if tmtErr := tmtWitnessOS.WriteFile(tmtWitnessOS.Getenv(%q), tmtData, 0600); tmtErr != nil { %s.Fatal(tmtErr) }
 }
-`, sourceWitnessEnvironment)
+`, param, sourceWitnessEnvironment, param)
 	body.WriteString(trial.literalFunction())
 	return body.String()
 }
@@ -211,27 +230,47 @@ if err := tmtWitnessOS.WriteFile(tmtWitnessOS.Getenv(%q), data, 0600); err != ni
 func (trial sourceWitnessTrial) assertion(witness SourceWitness, proof bool) string {
 	var body strings.Builder
 	fmt.Fprintf(&body, "package %s\n", trial.pkg.Name)
+	expected := trial.expectedExpr(witness.Original)
 	if proof {
+		param := "tmt" + trial.test + "T"
+		gotVar := "tmt" + trial.test + "Got"
 		body.WriteString(`import (
 	tmtWitnessMath "math"
 	tmtWitnessOS "os"
 	tmtWitnessReflect "reflect"
 	tmtWitnessStrconv "strconv"
-	"testing"
+	tmtWitnessTesting "testing"
 )
 `)
+		fmt.Fprintf(&body, "func %s(%s *tmtWitnessTesting.T) {\nif %s := %s; %s != %s {\n",
+			trial.test, param, gotVar, witness.Call, gotVar, expected)
+		fmt.Fprintf(&body, "if tmtErr := tmtWitnessOS.WriteFile(tmtWitnessOS.Getenv(%q), []byte(%q+%s(%s)), 0600); tmtErr != nil { %s.Fatal(tmtErr) }\n",
+			sourceWitnessEnvironment, trial.marker+"\n", trial.literalName(), gotVar, param)
+		fmt.Fprintf(&body, "%s.Fatalf(%q, %s)\n}\n}\n", param, "got %v, want "+strings.ReplaceAll(witness.Original, "%", "%%"), gotVar)
+		body.WriteString(trial.literalFunction())
+		return body.String()
+	}
+	testingType, param, gotVar := "testing.T", "t", "got"
+	if trial.idents.hasTesting {
+		body.WriteString("import tmtWitnessTesting \"testing\"\n")
+		testingType = "tmtWitnessTesting.T"
 	} else {
 		body.WriteString("import \"testing\"\n")
 	}
-	fmt.Fprintf(&body, "func %s(t *testing.T) {\nif got := %s; got != %s {\n", trial.test, witness.Call, witness.Original)
-	if proof {
-		fmt.Fprintf(&body, "if err := tmtWitnessOS.WriteFile(tmtWitnessOS.Getenv(%q), []byte(%q+%s(got)), 0600); err != nil { t.Fatal(err) }\n",
-			sourceWitnessEnvironment, trial.marker+"\n", trial.literalName())
+	if trial.idents.hasT || witnessUsesIdent(witness.Call, "t") {
+		param = "tmtT"
+		if witnessUsesIdent(witness.Call, param) {
+			param = "tmt" + trial.test + "T"
+		}
 	}
-	fmt.Fprintf(&body, "t.Fatalf(%q, got)\n}\n}\n", "got %v, want "+strings.ReplaceAll(witness.Original, "%", "%%"))
-	if proof {
-		body.WriteString(trial.literalFunction())
+	if trial.idents.hasGot || witnessUsesIdent(witness.Call, "got") {
+		gotVar = "tmtGot"
+		if witnessUsesIdent(witness.Call, gotVar) {
+			gotVar = "tmt" + trial.test + "Got"
+		}
 	}
+	fmt.Fprintf(&body, "func %s(%s *%s) {\nif %s := %s; %s != %s {\n", trial.test, param, testingType, gotVar, witness.Call, gotVar, expected)
+	fmt.Fprintf(&body, "%s.Fatalf(%q, %s)\n}\n}\n", param, "got %v, want "+strings.ReplaceAll(witness.Original, "%", "%%"), gotVar)
 	return body.String()
 }
 

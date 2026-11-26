@@ -11,7 +11,7 @@ import (
 	"github.com/t-k/targeted-mutation-go/internal/target"
 )
 
-const bytesPerSite = 24
+const bytesPerSite = target.BytesPerSite
 
 func makeOverlay(dir string, files []target.Replacement) (string, error) {
 	mapping := make(map[string]string, len(files))
@@ -66,10 +66,20 @@ func readTrace(path string, sites int) ([]byte, error) {
 
 func summary(data []byte, site int) analysis.Summary {
 	start := site * bytesPerSite
+	flags := binary.NativeEndian.Uint64(data[start:])
+	var belowGap, aboveGap uint64
+	if flags&analysis.Less != 0 {
+		belowGap = ^binary.NativeEndian.Uint64(data[start+24:])
+	}
+	if flags&analysis.Greater != 0 {
+		aboveGap = ^binary.NativeEndian.Uint64(data[start+32:])
+	}
 	return analysis.Summary{
-		Flags: binary.NativeEndian.Uint64(data[start:]),
-		Below: binary.NativeEndian.Uint64(data[start+8:]),
-		Above: ^binary.NativeEndian.Uint64(data[start+16:]),
+		Flags:    flags,
+		Below:    binary.NativeEndian.Uint64(data[start+8:]),
+		Above:    ^binary.NativeEndian.Uint64(data[start+16:]),
+		BelowGap: belowGap,
+		AboveGap: aboveGap,
 	}
 }
 

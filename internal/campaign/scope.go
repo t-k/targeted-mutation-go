@@ -57,6 +57,10 @@ func gitScope(ctx context.Context, dir, revision string, undo bool) (target.Scop
 			return nil, nil, err
 		}
 		matches := hunkHeader.FindAllSubmatch(patch, -1)
+		if len(matches) == 0 && bytes.Contains(patch, []byte("Binary files ")) {
+			scope[path] = []target.Span{{Start: 1, End: math.MaxInt}}
+			continue
+		}
 		var current, previous [][]byte
 		var parsed *prSource
 		var offsets []int

@@ -61,18 +61,17 @@ type previousCandidate struct {
 	source  *sourceJob
 }
 
-func (s *session) comparePrevious(ctx context.Context, report *Report, changed target.Scope, files []target.Replacement, reached [][]*consumer) error {
-	candidates := s.previousCandidates(report, changed, reached)
-	report.Findings = slices.DeleteFunc(report.Findings, func(f Finding) bool {
-		if f.Rule == "revert" {
-			return false
-		}
-		switch f.Status {
-		case "input-gap", "assertion-gap", "source-survivor", "non-viable", "unreached", "killed":
-			return !changed.Contains(filepath.Join(s.cfg.Dir, filepath.FromSlash(f.File)), f.Line, f.Line)
-		}
-		return false
-	})
+func (s *session) findingInScope(changed target.Scope, f Finding) bool {
+	if f.Rule == "revert" {
+		return true
+	}
+	start, end := f.spanLines()
+	return changed.Contains(filepath.Join(s.cfg.Dir, filepath.FromSlash(f.File)), start, end)
+}
+
+func (s *session) comparePrevious(ctx context.Context, report *Report, changed target.Scope, files []target.Replacement, reached [][]*consumer, allObserved []Finding) error {
+	candidates := s.previousCandidates(allObserved, changed, reached)
+	s.resetReportToScope(report, changed, reached, allObserved)
 	if len(candidates) == 0 {
 		return nil
 	}
@@ -154,15 +153,56 @@ func (s *session) comparePrevious(ctx context.Context, report *Report, changed t
 			f := candidates[i].finding
 			f.Status, f.Evidence, f.Tests = "weakened-test", "previous-tests", result.finding.Tests
 			f.Detail = "previous tests caught this mutation on the current source"
-			report.add(f, s.cfg.KilledFindings)
+			s.recordFinding(report, f, false)
 		} else if previousUnconfirmed(result.finding.Status) {
 			f := candidates[i].finding
 			f.Status, f.Evidence = "not-evaluated", "previous-tests"
 			f.Detail = fmt.Sprintf("previous test comparison %s: %s", result.finding.Status, result.finding.Detail)
-			report.add(f, s.cfg.KilledFindings)
+			s.recordFinding(report, f, false)
 		}
 	}
 	return nil
+}
+
+func (s *session) resetReportToScope(report *Report, changed target.Scope, reached [][]*consumer, allObserved []Finding) {
+	report.Sites = 0
+	report.Killed = 0
+	report.TimedOut = 0
+	report.Unreached = 0
+	report.Rejected = 0
+	report.Incomplete = 0
+	report.Suppressed = 0
+	report.Findings = report.Findings[:0]
+	for _, site := range s.sites {
+		if !changed.Contains(site.File, site.StartLine, site.EndLine) {
+			continue
+		}
+		report.Sites++
+		if len(reached[site.ID]) == 0 {
+			f := Finding{Status: "unreached", File: s.rel(site.File), Line: site.Line, Column: site.Column,
+				StartLine: site.StartLine, EndLine: site.EndLine, Expression: site.Expression}
+			s.identify(&f)
+			if s.enabled(f) && !s.isIgnored(f) {
+				report.Unreached++
+				if s.cfg.ShowUnreached {
+					report.Findings = append(report.Findings, f)
+				}
+			}
+		}
+	}
+	for _, f := range allObserved {
+		if isIncompleteVerdict(f.Status) || s.findingInScope(changed, f) {
+			s.recordFinding(report, f, f.Detail == "killed by timeout")
+		}
+	}
+}
+
+func isIncompleteVerdict(status string) bool {
+	switch status {
+	case "", "killed", "non-viable", "unreached":
+		return false
+	}
+	return !isGapStatus(status)
 }
 
 // Go overlays can expose a package whose directory was deleted, but an executable
@@ -255,32 +295,36 @@ func previousUnconfirmed(status string) bool {
 }
 
 func (s *session) uncheckedPrevious(report *Report, file, detail string) {
-	f := Finding{Status: "not-evaluated", Evidence: "previous-tests", File: s.rel(file), Line: 1, Column: 1, Rule: "weakened-test", Detail: detail}
+	f := Finding{Status: "not-evaluated", Evidence: "previous-tests", File: s.rel(file), Line: 1, Column: 1,
+		StartLine: 1, EndLine: 1, Rule: "weakened-test", Detail: detail}
 	s.identify(&f)
-	report.add(f, s.cfg.KilledFindings)
+	s.recordFinding(report, f, false)
 }
 
-func (s *session) previousCandidates(report *Report, changed target.Scope, reached [][]*consumer) []previousCandidate {
+func (s *session) previousCandidates(allObserved []Finding, changed target.Scope, reached [][]*consumer) []previousCandidate {
 	survivors := make(map[string]Finding)
-	for _, f := range report.Findings {
+	for _, f := range allObserved {
 		switch f.Status {
 		case "input-gap", "assertion-gap", "source-survivor":
-			if !changed.Contains(filepath.Join(s.cfg.Dir, filepath.FromSlash(f.File)), f.Line, f.Line) {
+			if !s.findingInScope(changed, f) && !s.isIgnored(f) {
 				survivors[f.ID] = f
 			}
 		}
 	}
 	var result []previousCandidate
 	for _, site := range s.sites {
-		if site.String || changed.Contains(site.File, site.Line, site.Line) {
+		if site.String || changed.Contains(site.File, site.StartLine, site.EndLine) {
 			continue
 		}
-		for _, candidate := range analysis.Preview(site.Op, site.Domain, !s.cfg.Conventional) {
+		for _, candidate := range analysis.PreviewSite(site.Op, site.Domain, site.Margin, site.Float, !s.cfg.Conventional) {
 			if !s.comparisonEnabled(candidate.Kind) {
 				continue
 			}
 			job := probeJob{site: site, candidate: candidate}
 			job.finding = s.describe(job, analysis.Summary{})
+			if s.isIgnored(job.finding) {
+				continue
+			}
 			f, recorded := survivors[job.finding.ID]
 			if !recorded {
 				if len(reached[site.ID]) != 0 || !s.enabled(job.finding) {

@@ -1,10 +1,10 @@
 
 func PROBECompareString[T ~string](site int, mask uint64, left, right T) uint64 {
 	order := uint64(1) << (1 + PROBEstrings.Compare(string(left), string(right)))
-	state := &PROBEStateValue
-	if state.slots != nil {
+	state := PROBEGetState()
+	if state.slots != nil && site >= 0 && site*5+5 <= len(state.slots) {
 		if state.site < 0 {
-			PROBERecord(&state.slots[site*3], order)
+			PROBERecord(&state.slots[site*5], order)
 		} else if state.site == site {
 			return PROBEActivate(state, site, mask, order, order)
 		}

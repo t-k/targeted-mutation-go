@@ -2,6 +2,7 @@ package PROBE_PACKAGE
 
 import (
 	PROBEos "os"
+	PROBEruntime "runtime"
 	PROBEstrconv "strconv"
 	PROBEstrings "strings"
 	PROBEatomic "sync/atomic"
@@ -15,13 +16,29 @@ type PROBEInteger interface {
 
 type PROBEState struct {
 	slots []uint64
-	site int
-	mask uint64
+	site  int
+	mask  uint64
 	pivot uint64
-	shift bool
+	mode  uint8
 }
 
-var PROBEStateValue = PROBEOpen()
+var PROBEStateOnce uint32
+var PROBEStateValue PROBEState
+
+func PROBEGetState() *PROBEState {
+	if PROBEatomic.LoadUint32(&PROBEStateOnce) == 2 {
+		return &PROBEStateValue
+	}
+	if PROBEatomic.CompareAndSwapUint32(&PROBEStateOnce, 0, 1) {
+		PROBEStateValue = PROBEOpen()
+		PROBEatomic.StoreUint32(&PROBEStateOnce, 2)
+		return &PROBEStateValue
+	}
+	for PROBEatomic.LoadUint32(&PROBEStateOnce) != 2 {
+		PROBEruntime.Gosched()
+	}
+	return &PROBEStateValue
+}
 
 func PROBEOpen() PROBEState {
 	state := PROBEState{site: -1}
@@ -60,9 +77,17 @@ func PROBEOpen() PROBEState {
 		if err != nil {
 			panic(err)
 		}
-		state.shift, err = PROBEstrconv.ParseBool(fields[3])
-		if err != nil {
-			panic(err)
+		switch fields[3] {
+		case "false", "0":
+			state.mode = 0
+		case "true", "1":
+			state.mode = 1
+		case "margin-down":
+			state.mode = 2
+		case "margin-up":
+			state.mode = 3
+		default:
+			panic("invalid mutation selector")
 		}
 	}
 	return state
@@ -88,8 +113,8 @@ func PROBEOrder[T PROBEInteger](left, right T) uint64 {
 
 func PROBECompare[T PROBEInteger](site int, mask uint64, left, right T) uint64 {
 	order := PROBEOrder(left, right)
-	state := &PROBEStateValue
-	if state.slots == nil {
+	state := PROBEGetState()
+	if state.slots == nil || site < 0 || site*5+5 > len(state.slots) {
 		return order & mask
 	}
 	if state.site >= 0 {
@@ -97,29 +122,46 @@ func PROBECompare[T PROBEInteger](site int, mask uint64, left, right T) uint64 {
 			return order & mask
 		}
 		mutantOrder := order
-		if state.shift {
+		switch state.mode {
+		case 1:
 			mutantOrder = PROBEOrder(PROBERank(left), state.pivot)
+		case 2:
+			lRank, rRank := PROBERank(left), PROBERank(right)
+			if rRank == 0 {
+				mutantOrder = 4
+			} else {
+				mutantOrder = PROBEOrder(lRank, rRank-1)
+			}
+		case 3:
+			lRank, rRank := PROBERank(left), PROBERank(right)
+			if rRank == ^uint64(0) {
+				mutantOrder = 1
+			} else {
+				mutantOrder = PROBEOrder(lRank, rRank+1)
+			}
 		}
 		return PROBEActivate(state, site, mask, order, mutantOrder)
 	}
-	slot := state.slots[site*3 : site*3+3]
+	slot := state.slots[site*5 : site*5+5]
 	if order == 1 {
-		value := PROBERank(left)
-		for old := PROBEatomic.LoadUint64(&slot[1]); old < value; old = PROBEatomic.LoadUint64(&slot[1]) {
-			if PROBEatomic.CompareAndSwapUint64(&slot[1], old, value) {
-				break
-			}
-		}
+		lRank, rRank := PROBERank(left), PROBERank(right)
+		PROBEMax(&slot[1], lRank)
+		PROBEMax(&slot[3], ^(rRank - lRank))
 	} else if order == 4 {
-		value := ^PROBERank(left)
-		for old := PROBEatomic.LoadUint64(&slot[2]); old < value; old = PROBEatomic.LoadUint64(&slot[2]) {
-			if PROBEatomic.CompareAndSwapUint64(&slot[2], old, value) {
-				break
-			}
-		}
+		lRank, rRank := PROBERank(left), PROBERank(right)
+		PROBEMax(&slot[2], ^lRank)
+		PROBEMax(&slot[4], ^(lRank - rRank))
 	}
 	PROBERecord(&slot[0], order)
 	return order & mask
+}
+
+func PROBEMax(word *uint64, value uint64) {
+	for old := PROBEatomic.LoadUint64(word); old < value; old = PROBEatomic.LoadUint64(word) {
+		if PROBEatomic.CompareAndSwapUint64(word, old, value) {
+			return
+		}
+	}
 }
 
 func PROBEActivate(state *PROBEState, site int, mask, order, mutantOrder uint64) uint64 {
@@ -128,12 +170,18 @@ func PROBEActivate(state *PROBEState, site int, mask, order, mutantOrder uint64)
 	if (order&mask != 0) != (mutant != 0) {
 		flags |= 16
 	}
-	PROBERecord(&state.slots[site*3], flags)
+	PROBERecord(&state.slots[site*5], flags)
 	return mutant
 }
 
 func PROBERecord(word *uint64, bits uint64) {
-	if PROBEatomic.LoadUint64(word)&bits != bits {
-		PROBEatomic.OrUint64(word, bits)
+	for {
+		old := PROBEatomic.LoadUint64(word)
+		if old&bits == bits {
+			return
+		}
+		if PROBEatomic.CompareAndSwapUint64(word, old, old|bits) {
+			return
+		}
 	}
 }

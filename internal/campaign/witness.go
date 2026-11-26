@@ -3,6 +3,8 @@ package campaign
 import (
 	"context"
 	"fmt"
+	"go/ast"
+	"go/parser"
 	"os"
 	"path/filepath"
 	"slices"
@@ -14,6 +16,7 @@ import (
 type witnessJob struct {
 	index int
 	test  string
+	code  string
 	probe probeJob
 }
 
@@ -102,7 +105,53 @@ func (s *session) verifyWitnesses(ctx context.Context, report *Report, probes []
 }
 
 func witnessCode(w *Witness) string {
-	return fmt.Sprintf("if got := %s; got != %t {\n\tt.Fatalf(\"got %%v, want %t\", got)\n}", w.Call, w.Original, w.Original)
+	return witnessAssertionCode(w, "t", "got", false)
+}
+
+func witnessAssertionCode(w *Witness, param, gotVar string, shadowedBool bool) string {
+	expected := fmt.Sprintf("%t", w.Original)
+	if shadowedBool {
+		expected = "(0 != 0)"
+		if w.Original {
+			expected = "(0 == 0)"
+		}
+	}
+	return fmt.Sprintf("if %s := %s; %s != %s {\n\t%s.Fatalf(\"got %%v, want %t\", %s)\n}",
+		gotVar, w.Call, gotVar, expected, param, w.Original, gotVar)
+}
+
+func witnessUsesIdent(expr, ident string) bool {
+	parsed, err := parser.ParseExpr(expr)
+	if err != nil {
+		return false
+	}
+	found := false
+	ast.Inspect(parsed, func(node ast.Node) bool {
+		if id, ok := node.(*ast.Ident); ok && id.Name == ident {
+			found = true
+			return false
+		}
+		return true
+	})
+	return found
+}
+
+func witnessParamAndCode(job witnessJob, w *Witness, prefix string, idents shadowedIdents) (string, string) {
+	param := "t"
+	if idents.hasT || job.probe.site.Callable == "t" || witnessUsesIdent(w.Call, "t") {
+		param = "tmtT"
+		if job.probe.site.Callable == param || witnessUsesIdent(w.Call, param) {
+			param = "tmt" + prefix + "T"
+		}
+	}
+	gotVar := "got"
+	if idents.hasGot || job.probe.site.Callable == "got" || witnessUsesIdent(w.Call, "got") {
+		gotVar = "tmtGot"
+		if job.probe.site.Callable == gotVar || witnessUsesIdent(w.Call, gotVar) {
+			gotVar = "tmt" + prefix + "Got"
+		}
+	}
+	return param, witnessAssertionCode(w, param, gotVar, idents.hasBool)
 }
 
 func (s *session) verifyWitnessGroup(ctx context.Context, report *Report, pkg target.Package, jobs []witnessJob) error {
@@ -111,17 +160,24 @@ func (s *session) verifyWitnessGroup(ctx context.Context, report *Report, pkg ta
 		return err
 	}
 	defer os.RemoveAll(dir)
+	path := filepath.Join(pkg.Dir, strings.ToLower(pkg.Prefix)+"_witness_test.go")
+	if _, err := os.Lstat(path); !os.IsNotExist(err) {
+		return fmt.Errorf("synthetic witness path is occupied: %s", path)
+	}
+	var extra [][]byte
+	for _, file := range pkg.Files {
+		extra = append(extra, file.Data)
+	}
+	idents := packageShadowedIdents(pkg.Dir, extra...)
 	var source strings.Builder
-	fmt.Fprintf(&source, "package %s\nimport \"testing\"\n", pkg.Name)
+	fmt.Fprintf(&source, "package %s\nimport tmtWitnessTesting \"testing\"\n", pkg.Name)
 	for i := range jobs {
 		job := &jobs[i]
 		job.test = fmt.Sprintf("TestTmt%sWitness%d", pkg.Prefix, i)
 		w := report.Findings[job.index].Witness
-		fmt.Fprintf(&source, "func %s(t *testing.T) {\n%s\n}\n", job.test, witnessCode(w))
-	}
-	path := filepath.Join(pkg.Dir, strings.ToLower(pkg.Prefix)+"_witness_test.go")
-	if _, err := os.Lstat(path); !os.IsNotExist(err) {
-		return fmt.Errorf("synthetic witness path is occupied: %s", path)
+		param, code := witnessParamAndCode(*job, w, pkg.Prefix, idents)
+		job.code = code
+		fmt.Fprintf(&source, "func %s(%s *tmtWitnessTesting.T) {\n%s\n}\n", job.test, param, job.code)
 	}
 	files := append(slices.Clone(s.replacements), target.Replacement{Path: path, Data: []byte(source.String())})
 	overlay, err := makeOverlay(dir, files)
@@ -130,33 +186,74 @@ func (s *session) verifyWitnessGroup(ctx context.Context, report *Report, pkg ta
 	}
 	bin := consumer{pkg: pkg.Path, dir: pkg.Dir, binary: filepath.Join(dir, "witness.test")}
 	if err := s.build(ctx, overlay, &bin, s.cfg.Jobs); err != nil {
-		return err
+		if len(jobs) == 1 {
+			return err
+		}
+		for _, job := range jobs {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			if singleErr := s.verifyWitnessSingle(ctx, report, pkg, path, dir, idents, job); singleErr != nil {
+				report.Findings[job.index].Detail = "witness verification: " + singleErr.Error()
+				report.Incomplete++
+			}
+		}
+		return nil
 	}
 	for _, job := range jobs {
-		// An original failure or absent witness stays explicitly unverified.
-		base := s.runBinary(ctx, &bin, "", "", job.test)
-		if base.kind != "passed" || !slices.Contains(base.tests, job.test) {
-			report.Findings[job.index].Detail = "generated witness did not pass on the original"
-			report.Incomplete++
-			continue
-		}
-		trace, err := newTrace(dir, len(s.sites))
-		if err != nil {
+		if err := s.runWitnessVerification(ctx, report, dir, &bin, job); err != nil {
 			return err
 		}
-		mutated := s.runBinary(ctx, &bin, trace, selector(job.probe.site, job.probe.candidate), job.test)
-		flags, err := readFlags(trace, job.probe.site.ID)
-		if err != nil {
-			return err
-		}
-		f := &report.Findings[job.index]
-		if mutated.kind == "failed" && flags&24 == 24 && slices.Contains(mutated.failed, job.test) {
-			f.Witness.Verified = true
-			f.Witness.Code = witnessCode(f.Witness)
-		} else {
-			f.Detail = "generated witness did not fail on the applied mutant"
-			report.Incomplete++
-		}
+	}
+	return nil
+}
+
+func (s *session) verifyWitnessSingle(ctx context.Context, report *Report, pkg target.Package, path, rootDir string, idents shadowedIdents, job witnessJob) error {
+	dir, err := os.MkdirTemp(rootDir, "single-")
+	if err != nil {
+		return err
+	}
+	w := report.Findings[job.index].Witness
+	param, code := witnessParamAndCode(job, w, pkg.Prefix, idents)
+	job.code = code
+	source := fmt.Sprintf("package %s\nimport tmtWitnessTesting \"testing\"\nfunc %s(%s *tmtWitnessTesting.T) {\n%s\n}\n",
+		pkg.Name, job.test, param, job.code)
+	files := append(slices.Clone(s.replacements), target.Replacement{Path: path, Data: []byte(source)})
+	overlay, err := makeOverlay(dir, files)
+	if err != nil {
+		return err
+	}
+	bin := consumer{pkg: pkg.Path, dir: pkg.Dir, binary: filepath.Join(dir, "witness.test")}
+	if err := s.build(ctx, overlay, &bin, 1); err != nil {
+		return err
+	}
+	return s.runWitnessVerification(ctx, report, dir, &bin, job)
+}
+
+func (s *session) runWitnessVerification(ctx context.Context, report *Report, dir string, bin *consumer, job witnessJob) error {
+	// An original failure or absent witness stays explicitly unverified.
+	base := s.runBinary(ctx, bin, "", "", job.test)
+	if base.kind != "passed" || !slices.Contains(base.tests, job.test) {
+		report.Findings[job.index].Detail = "generated witness did not pass on the original"
+		report.Incomplete++
+		return nil
+	}
+	trace, err := newTrace(dir, len(s.sites))
+	if err != nil {
+		return err
+	}
+	mutated := s.runBinary(ctx, bin, trace, selector(job.probe.site, job.probe.candidate), job.test)
+	flags, err := readFlags(trace, job.probe.site.ID)
+	if err != nil {
+		return err
+	}
+	f := &report.Findings[job.index]
+	if mutated.kind == "failed" && flags&24 == 24 && slices.Contains(mutated.failed, job.test) {
+		f.Witness.Verified = true
+		f.Witness.Code = job.code
+	} else {
+		f.Detail = "generated witness did not fail on the applied mutant"
+		report.Incomplete++
 	}
 	return nil
 }

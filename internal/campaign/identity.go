@@ -96,9 +96,13 @@ func (s *session) preview(report *Report) {
 		if site.String {
 			continue
 		}
-		for _, candidate := range analysis.Preview(site.Op, site.Domain, !s.cfg.Conventional) {
+		for _, candidate := range analysis.PreviewSite(site.Op, site.Domain, site.Margin, site.Float, !s.cfg.Conventional) {
 			f := s.describe(probeJob{site: site, candidate: candidate}, analysis.Summary{})
 			if s.comparisonEnabled(candidate.Kind) && s.enabled(f) {
+				if s.isIgnored(f) {
+					report.Suppressed++
+					continue
+				}
 				f.Status = "candidate"
 				report.Findings = append(report.Findings, f)
 			}
@@ -106,6 +110,10 @@ func (s *session) preview(report *Report) {
 	}
 	for _, source := range s.sources {
 		f := source.finding
+		if s.isIgnored(f) {
+			report.Suppressed++
+			continue
+		}
 		f.Status = "candidate"
 		report.Findings = append(report.Findings, f)
 	}

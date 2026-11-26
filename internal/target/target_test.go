@@ -1,10 +1,13 @@
 package target
 
 import (
+	"bytes"
 	"context"
+	"encoding/binary"
 	"fmt"
 	"go/parser"
 	"go/token"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -163,7 +166,7 @@ func TestForcedComparisonProbePICT(t *testing.T) {
 		}
 		valid := fields[1] == "parameters" || fields[1] == "literal"
 		if strings.HasPrefix(fields[0], "tight-") && fields[2] == "false" {
-			valid = false
+			change = "(false)"
 		}
 		var forced, negated *Edit
 		for j := range pkg[0].Files[0].Edits {
@@ -219,8 +222,11 @@ func isConstant(p *int) int { return len([1]bool{*p > 0}) }
 		site.Domain.Low != analysis.RankSigned(-32768) || site.Callable != "free" {
 		t.Fatalf("wrong reversed signed site: %+v", site)
 	}
-	if file.Sites[1].Domain != nil {
-		t.Fatal("two variable operands acquired a literal threshold")
+	if file.Sites[1].Domain != nil || !file.Sites[1].Margin {
+		t.Fatal("two variable operands should set Margin without a literal threshold")
+	}
+	if file.Sites[2].StartLine >= file.Sites[2].EndLine {
+		t.Fatalf("expected multi-line site span, got %d..%d", file.Sites[2].StartLine, file.Sites[2].EndLine)
 	}
 	for i, candidate := range file.Sites {
 		candidate.ID = i
@@ -469,4 +475,278 @@ func Allowed(n int) bool { return n >= int(C.base()) }
 		}
 	}
 	t.Fatal("missing source-level cgo mutation")
+}
+
+func TestRuntimeInitOrderAndProbeExecution(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "go.mod", "module example.org/initorder\n\ngo 1.18\n")
+	write(t, dir, "a.go", `package initorder
+var log []string
+var first = record("first", 10, 5)
+func record(tag string, x, y int) int {
+	if x > y {
+		log = append(log, tag)
+	}
+	return x
+}
+func CheckFloat(a, b float64) bool { return a < b }
+`)
+	write(t, dir, "000000_early.go", `package initorder
+var zero = record("zero", 2, 1)
+`)
+	write(t, dir, "initorder_test.go", `package initorder
+import (
+	"math"
+	"reflect"
+	"testing"
+)
+func TestInitOrderAndFloat(t *testing.T) {
+	if !reflect.DeepEqual(log, []string{"zero", "first"}) {
+		t.Fatalf("var init order broken: %v", log)
+	}
+	if !CheckFloat(1.5, 2.5) || CheckFloat(math.NaN(), 1.0) {
+		t.Fatal("float comparison failed")
+	}
+}
+`)
+	pkgs, err := Discover(context.Background(), dir, []string{"."}, "", nil, Discovery{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rt := Runtime(pkgs[0])
+	if len(rt) != 1 {
+		t.Fatalf("expected 1 runtime file, got %d", len(rt))
+	}
+	rtBase := filepath.Base(rt[0].Path)
+	if rtBase >= "000000_early.go" || rtBase >= "a.go" {
+		t.Fatalf("runtime filename %q does not precede package files", rtBase)
+	}
+	rtSrc := string(rt[0].Data)
+	if strings.Contains(rtSrc, "OrUint64") || strings.Contains(rtSrc, "var "+pkgs[0].Prefix+"StateValue =") {
+		t.Fatalf("runtime violates Go 1.18 compatibility or var init order")
+	}
+
+	// Materialize instrumented files + runtime into a temp copy and run `go vet` and `go test`.
+	runDir := t.TempDir()
+	write(t, runDir, "go.mod", "module example.org/initorder\n\ngo 1.18\n")
+	for _, name := range []string{"000000_early.go", "a.go", "initorder_test.go"} {
+		copyData, err := os.ReadFile(filepath.Join(dir, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		write(t, runDir, name, string(copyData))
+	}
+	siteID := 0
+	for _, f := range pkgs[0].Files {
+		for _, s := range f.Sites {
+			s.ID = siteID
+			siteID++
+		}
+		write(t, runDir, filepath.Base(f.Path), string(Rewrite(f, pkgs[0].Prefix)))
+	}
+	// Re-generate runtime after setting site IDs, and ensure ProbeFloat is included.
+	rt = Runtime(pkgs[0])
+	write(t, runDir, filepath.Base(rt[0].Path), string(rt[0].Data))
+
+	vet := exec.Command("go", "vet", "./...")
+	vet.Dir = runDir
+	if out, err := vet.CombinedOutput(); err != nil {
+		t.Fatalf("go vet failed: %v\n%s", err, out)
+	}
+
+	tracePath := filepath.Join(t.TempDir(), "trace.bin")
+	if err := os.WriteFile(tracePath, make([]byte, siteID*BytesPerSite), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("go", "test", "-count=1", ".")
+	cmd.Dir = runDir
+	cmd.Env = append(os.Environ(), "TMT_GO_TRACE="+tracePath)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("instrumented test failed: %v\n%s", err, out)
+	}
+	trace, err := os.ReadFile(tracePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Check site 1 (CheckFloat): Less (1) and Unordered (32) recorded in slot[0].
+	var floatSiteID int
+	for _, f := range pkgs[0].Files {
+		for _, s := range f.Sites {
+			if s.Float {
+				floatSiteID = s.ID
+			}
+		}
+	}
+	flags := binary.LittleEndian.Uint64(trace[floatSiteID*BytesPerSite:])
+	if flags&(analysis.Less|analysis.Unordered) != (analysis.Less | analysis.Unordered) {
+		t.Fatalf("expected float Less|Unordered flags, got %d", flags)
+	}
+
+	// Check margin-down on site 0 (`record("first", 10, 5)` has x=10, y=5 -> margin-down mutates y to 4, still true; check margin-up/down on a margin test).
+	var recordSiteID int
+	for _, f := range pkgs[0].Files {
+		if filepath.Base(f.Path) == "a.go" {
+			for _, s := range f.Sites {
+				if !s.Float {
+					recordSiteID = s.ID
+				}
+			}
+		}
+	}
+	// Check gap recorded at slot[4] for x=10 > y=5 (gap = 5) and x=2 > y=1 (gap = 1).
+	recordSlot := trace[recordSiteID*BytesPerSite : (recordSiteID+1)*BytesPerSite]
+	aboveGap := ^binary.LittleEndian.Uint64(recordSlot[32:40])
+	if aboveGap != 1 {
+		t.Fatalf("expected AboveGap=1, got %d", aboveGap)
+	}
+
+	// Exercise margin-down mutation on CheckFloat? No, exercise margin-up on recordSiteID: 2 > 1+1 is false -> breaks `zero`!
+	mutTrace := filepath.Join(t.TempDir(), "mut.bin")
+	if err := os.WriteFile(mutTrace, make([]byte, siteID*BytesPerSite), 0600); err != nil {
+		t.Fatal(err)
+	}
+	mutCmd := exec.Command("go", "test", "-count=1", ".")
+	mutCmd.Dir = runDir
+	mutCmd.Env = append(os.Environ(),
+		"TMT_GO_TRACE="+mutTrace,
+		fmt.Sprintf("TMT_GO_MUTATION=%d:%d:0:margin-up", recordSiteID, analysis.GT.Mask()),
+	)
+	if out, err := mutCmd.CombinedOutput(); err == nil {
+		t.Fatalf("expected margin-up mutation to kill test, but passed:\n%s", out)
+	}
+	mutData, err := os.ReadFile(mutTrace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mutFlags := binary.LittleEndian.Uint64(mutData[recordSiteID*BytesPerSite:]); mutFlags&24 != 24 {
+		t.Fatalf("expected Activated|Changed (24) in mutated trace, got %d", mutFlags)
+	}
+	_ = bytes.Equal
+	_ = math.NaN
+}
+
+func TestSyntheticProbeFileNameOrdering(t *testing.T) {
+	for _, paths := range [][]string{
+		{"a.go", "z.go"},
+		{"000000_a.go"},
+		{"0.go"},
+		{"0-.go"},
+		{"0!.go"},
+	} {
+		name, ok := syntheticProbeFileName("tmtGo123456", paths)
+		if !ok || name == "" || name[0] < '0' || name[0] > '9' {
+			t.Fatalf("synthetic name %q (ok=%v) must start with an ASCII digit for cmd/go SafeArg", name, ok)
+		}
+		for _, p := range paths {
+			if filepath.Base(p) <= name {
+				t.Fatalf("synthetic name %q does not precede %q", name, p)
+			}
+		}
+	}
+}
+
+func TestFloatAndLenCapAndBlankFunc(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "go.mod", "module example.org/features\n\ngo 1.26.0\n")
+	write(t, dir, "features.go", `package features
+type MyFloat float64
+func FloatCmp(a, b MyFloat) bool {
+	if a <= 0 {
+		return false
+	}
+	return a < b
+}
+func SliceCheck(xs []int, f func() []int) bool {
+	if len(f()) > 0 {
+		return false
+	}
+	return len(xs) > 0 && cap(xs) >= 4
+}
+func _(x int) bool { return x > 0 }
+`)
+	// Default mode (Full: false) should still discover float probes and len/cap!
+	pkgs, err := Discover(context.Background(), dir, []string{"."}, "", nil, Discovery{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sites := pkgs[0].Files[0].Sites
+	if len(sites) != 5 {
+		t.Fatalf("got %d sites, want 5: %+v", len(sites), sites)
+	}
+	if !sites[0].Float || !sites[1].Float {
+		t.Fatalf("expected float sites in default mode: %+v", sites[:2])
+	}
+	if sites[2].Expression != "len(xs) > 0" || sites[3].Expression != "cap(xs) >= 4" {
+		t.Fatalf("unexpected len/cap sites: %+v", sites[2:4])
+	}
+	if sites[4].Callable != "" {
+		t.Fatalf("blank function should not get Callable, got %q", sites[4].Callable)
+	}
+
+	// Full mode: float source-operator edits route to site (excluding boundary/negation),
+	// and condition-negation on ordered float does NOT route to site.
+	fullPkgs, err := Discover(context.Background(), dir, []string{"."}, "", nil, Discovery{Full: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var routedFloatOps, floatCondNeg int
+	for _, e := range fullPkgs[0].Files[0].Edits {
+		if e.Kind == "source-operator" && e.Site != nil && e.Site.Float {
+			routedFloatOps++
+		}
+		if e.Kind == "condition-negation" && e.Line == 4 && e.Site != nil {
+			floatCondNeg++
+		}
+	}
+	if routedFloatOps == 0 {
+		t.Fatal("expected float source-operator edits routed to site")
+	}
+	if floatCondNeg != 0 {
+		t.Fatal("ordered float condition-negation must not route to site (NaN semantics differ)")
+	}
+}
+
+func TestParseIgnoreComments(t *testing.T) {
+	src := `package ign
+//line virtual.go:999
+func f(x int) bool {
+	if x > 0 { // tmt:ignore: intentional
+		return true
+	}
+	// tmt:ignore: multi-line explanation
+	// still explaining
+	if x < -1 {
+		return false
+	}
+	// tmt:ignore
+
+	if x == 0 {
+		return true
+	}
+	/* tmt:ignore: block comment */
+	return x != 5
+	// tmt:ignored not a directive
+}
+`
+	fset := token.NewFileSet()
+	syntax, err := parser.ParseFile(fset, "ign.go", src, parser.ParseComments|parser.SkipObjectResolution)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ignored := ParseIgnoreComments(fset, syntax, []byte(src))
+	if got := ignored[4]; got != "intentional" {
+		t.Fatalf("line 4 ignored = %q, want %q", got, "intentional")
+	}
+	if got := ignored[9]; got != "multi-line explanation" {
+		t.Fatalf("line 9 ignored = %q, want %q", got, "multi-line explanation")
+	}
+	if _, ok := ignored[14]; ok {
+		t.Fatalf("blank line should prevent tmt:ignore from ignoring line 14: %+v", ignored)
+	}
+	if got := ignored[18]; got != "block comment" {
+		t.Fatalf("line 18 ignored = %q, want %q", got, "block comment")
+	}
+	if _, ok := ignored[19]; ok {
+		t.Fatalf("tmt:ignored should not match: %+v", ignored)
+	}
 }

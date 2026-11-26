@@ -105,4 +105,46 @@ theorem unsigned_remainder_bounds (x d : Nat) (positive : 0 < d) : x % d ≤ d -
   have bound := Nat.mod_lt x positive
   omega
 
+theorem rank_difference_exact (x y : BitVec 64) :
+    (x ^^^ (1#64 <<< 63)) - (y ^^^ (1#64 <<< 63)) = x - y := by
+  bv_decide
+
+def prevMaskedStep (x forbidden bit : BitVec 64) : BitVec 64 :=
+  let lowMask := bit - 1#64
+  (x &&& (~~~(lowMask ||| bit))) ||| ((~~~forbidden) &&& lowMask)
+
+theorem prev_masked_step_exact (x forbidden bit w : BitVec 64)
+    (hpow : bit ≠ 0#64 ∧ bit &&& (bit - 1#64) = 0#64)
+    (hbit : (x &&& forbidden) &&& bit ≠ 0#64)
+    (hmsb : (x &&& forbidden) &&& (~~~((bit - 1#64) ||| bit)) = 0#64) :
+    let v := prevMaskedStep x forbidden bit
+    v &&& forbidden = 0#64 ∧ BitVec.ult v x ∧
+      (w &&& forbidden = 0#64 → BitVec.ule w x → BitVec.ule w v) := by
+  unfold prevMaskedStep
+  bv_decide
+
+def nextMaskedStep (x lowBit : BitVec 64) : BitVec 64 :=
+  (x &&& (~~~(lowBit - 1#64))) ||| lowBit
+
+theorem next_masked_step_exact (x forbidden bit lowBit w : BitVec 64)
+    (hpowBit : bit ≠ 0#64 ∧ bit &&& (bit - 1#64) = 0#64)
+    (hbit : (x &&& forbidden) &&& bit ≠ 0#64)
+    (hmsb : (x &&& forbidden) &&& (~~~((bit - 1#64) ||| bit)) = 0#64)
+    (hlow : lowBit ≠ 0#64 ∧ lowBit &&& (lowBit - 1#64) = 0#64)
+    (hallowed : ((~~~forbidden &&& ~~~x) &&& (~~~((bit - 1#64) ||| bit))) &&& lowBit ≠ 0#64)
+    (hle : ((~~~forbidden &&& ~~~x) &&& (~~~((bit - 1#64) ||| bit))) &&& (lowBit - 1#64) = 0#64) :
+    let v := nextMaskedStep x lowBit
+    v &&& forbidden = 0#64 ∧ BitVec.ult x v ∧
+      (w &&& forbidden = 0#64 → BitVec.ule x w → BitVec.ule v w) := by
+  unfold nextMaskedStep
+  bv_decide
+
+theorem next_masked_none (x forbidden bit w : BitVec 64)
+    (hpowBit : bit ≠ 0#64 ∧ bit &&& (bit - 1#64) = 0#64)
+    (hbit : (x &&& forbidden) &&& bit ≠ 0#64)
+    (hmsb : (x &&& forbidden) &&& (~~~((bit - 1#64) ||| bit)) = 0#64)
+    (hnone : (~~~forbidden &&& ~~~x) &&& (~~~((bit - 1#64) ||| bit)) = 0#64) :
+    w &&& forbidden = 0#64 → ¬ BitVec.ule x w := by
+  bv_decide
+
 end TargetedMutation

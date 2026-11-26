@@ -12,6 +12,7 @@ import (
 	"go/types"
 	"math"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -43,11 +44,12 @@ type Package struct {
 }
 
 type File struct {
-	Path   string
-	Data   []byte
-	Sites  []*Site
-	Edits  []Edit
-	Owners []Declaration
+	Path    string
+	Data    []byte
+	Sites   []*Site
+	Edits   []Edit
+	Owners  []Declaration
+	Ignored map[int]string
 }
 
 type Declaration struct {
@@ -59,6 +61,7 @@ type Site struct {
 	ID                      int
 	File                    string
 	Line, Column            int
+	StartLine, EndLine      int
 	Start, End, OperatorAt  int
 	LiteralAt               int
 	Left, Right, Expression string
@@ -68,12 +71,14 @@ type Site struct {
 	Arguments               []string
 	InputArgument           int
 	Reversed, String        bool
+	Float, Margin           bool
 	CanDropOperands         bool
 }
 
 type Edit struct {
 	File                string
 	Line, Column        int
+	StartLine, EndLine  int
 	Start, End          int
 	Before, After, Kind string
 	MissingReturn       bool
@@ -136,7 +141,11 @@ func Discover(ctx context.Context, dir string, patterns []string, tags string, s
 		if pkg.Module != nil && !pkg.Module.Main {
 			return nil, fmt.Errorf("package %s is outside the main module or workspace", pkg.PkgPath)
 		}
-		portable := !options.SourceOnly && !cgoWithoutTypes && (pkg.Module == nil || pkg.Module.GoVersion == "" || versionSupportsProbes(pkg.Module.GoVersion)) && runtimeNamesAvailable(pkg.Types.Scope())
+		_, probeOrderOK := syntheticProbeFileName(p.Prefix, p.Paths)
+		testDecls := samePackageTestDecls(pkg.Dir, pkg.Name)
+		portable := !options.SourceOnly && !cgoWithoutTypes && probeOrderOK &&
+			(pkg.Module == nil || pkg.Module.GoVersion == "" || versionSupportsProbes(pkg.Module.GoVersion)) &&
+			runtimeNamesAvailable(pkg.Types.Scope(), testDecls)
 		slices.SortFunc(pkg.Syntax, func(a, b *ast.File) int {
 			return strings.Compare(pkg.Fset.PositionFor(a.Pos(), false).Filename, pkg.Fset.PositionFor(b.Pos(), false).Filename)
 		})
@@ -156,9 +165,14 @@ func Discover(ctx context.Context, dir string, patterns []string, tags string, s
 				return nil, fmt.Errorf("missing parsed source for %s", path)
 			}
 			data := snapshot.([]byte)
-			file := &File{Path: path, Data: data, Owners: declarationOwners(syntax, astFile, data)}
+			file := &File{
+				Path:    path,
+				Data:    data,
+				Owners:  declarationOwners(syntax, astFile, data),
+				Ignored: ParseIgnoreComments(pkg.Fset, syntax, data),
+			}
 			if portable {
-				findSites(file, syntax, astFile, pkg, scope, options.Full)
+				findSites(file, syntax, astFile, pkg, scope, options.Full, testDecls)
 			}
 			if options.Full || options.SourceOnly {
 				discoverSourceEdits(file, syntax, astFile, pkg, scope, cgoWithoutTypes)
@@ -179,7 +193,12 @@ func Discover(ctx context.Context, dir string, patterns []string, tags string, s
 					return nil, fmt.Errorf("parse original source %s: %w", path, err)
 				}
 				if options.IncludeGenerated || !ast.IsGenerated(syntax) {
-					file := &File{Path: path, Data: data, Owners: declarationOwners(syntax, fset.File(syntax.Pos()), data)}
+					file := &File{
+						Path:    path,
+						Data:    data,
+						Owners:  declarationOwners(syntax, fset.File(syntax.Pos()), data),
+						Ignored: ParseIgnoreComments(fset, syntax, data),
+					}
 					discoverSourceEdits(file, syntax, fset.File(syntax.Pos()), pkg, scope, true)
 					if len(file.Edits) > 0 {
 						p.Files = append(p.Files, file)
@@ -223,11 +242,11 @@ func versionSupportsProbes(v string) bool {
 	return major > 1 || major == 1 && minor >= 18
 }
 
-func findSites(file *File, tree *ast.File, positions *token.File, pkg *packages.Package, scope Scope, full bool) {
+func findSites(file *File, tree *ast.File, positions *token.File, pkg *packages.Package, scope Scope, full bool, testDecls map[string]bool) {
 	text := func(node ast.Node) string {
 		return string(file.Data[positions.Offset(node.Pos()):positions.Offset(node.End())])
 	}
-	stringsOK := full && pkg.Types.Scope().Lookup("string") == nil
+	stringsOK := full && pkg.Types.Scope().Lookup("string") == nil && !testDecls["string"]
 	for _, decl := range tree.Decls {
 		fn, ok := decl.(*ast.FuncDecl)
 		if !ok || fn.Body == nil || hasCompilerDirective(fn) {
@@ -262,14 +281,15 @@ func findFunctionSites(file *File, fn *ast.FuncDecl, positions *token.File, pkg 
 				return true
 			}
 			op := operator(expr.Op)
-			if op != 0 && safeStatement(stack, pkg.TypesInfo, safety) && validOperand(expr.X) && validOperand(expr.Y) {
+			if op != 0 && safeStatement(stack, pkg.TypesInfo, safety) && validOperand(expr.X, pkg.TypesInfo) && validOperand(expr.Y, pkg.TypesInfo) {
 				site := &Site{
 					File: file.Path, Line: pos.Line, Column: pos.Column,
+					StartLine: start.Line, EndLine: end.Line,
 					Start: start.Offset, End: positions.Offset(expr.End()), OperatorAt: pos.Offset, Op: op,
 					Left: text(expr.X), Right: text(expr.Y), Expression: text(expr),
 				}
 				site.String = stringsOK && stringOperands(expr, pkg.TypesInfo)
-				if site.String || makeIntegerSite(site, expr, fn, pkg) {
+				if site.String || makeIntegerSite(site, expr, fn, pkg) || makeFloatSite(site, expr, pkg.TypesInfo) {
 					if full && site.Domain != nil {
 						constantOperand := expr.Y
 						if site.Reversed {
@@ -375,8 +395,8 @@ func safeEvaluation(stmt ast.Stmt, info *types.Info) bool {
 			case *ast.FuncLit:
 				return false
 			case *ast.CallExpr:
-				// A conversion is not a function evaluation.
-				safe = safe && info.Types[child.Fun].IsType()
+				// A conversion or len/cap call is not a general function evaluation.
+				safe = safe && (info.Types[child.Fun].IsType() || isLenOrCap(child, info))
 			case *ast.UnaryExpr:
 				safe = safe && child.Op != token.ARROW
 			}
@@ -386,13 +406,67 @@ func safeEvaluation(stmt ast.Stmt, info *types.Info) bool {
 	return safe
 }
 
-func runtimeNamesAvailable(scope *types.Scope) bool {
-	for _, name := range strings.Fields("int int8 int16 int32 int64 uint uint8 uint16 uint32 uint64 uintptr bool nil len panic") {
-		if scope.Lookup(name) != nil {
+func isLenOrCap(call *ast.CallExpr, info *types.Info) bool {
+	if len(call.Args) != 1 || info.Types[call].Value != nil {
+		return false
+	}
+	ident, ok := ast.Unparen(call.Fun).(*ast.Ident)
+	if !ok {
+		return false
+	}
+	builtin, ok := info.Uses[ident].(*types.Builtin)
+	return ok && (builtin.Name() == "len" || builtin.Name() == "cap")
+}
+
+func runtimeNamesAvailable(scope *types.Scope, testDecls map[string]bool) bool {
+	for _, name := range strings.Fields("int int8 int16 int32 int64 uint uint8 uint16 uint32 uint64 uintptr float32 float64 bool nil len panic") {
+		if scope.Lookup(name) != nil || testDecls[name] {
 			return false
 		}
 	}
 	return true
+}
+
+func samePackageTestDecls(dir, pkgName string) map[string]bool {
+	decls := make(map[string]bool)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return decls
+	}
+	fset := token.NewFileSet()
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), "_test.go") {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(dir, entry.Name()))
+		if err != nil {
+			continue
+		}
+		tree, err := parser.ParseFile(fset, entry.Name(), data, parser.SkipObjectResolution)
+		if err != nil || tree.Name.Name != pkgName {
+			continue
+		}
+		for _, decl := range tree.Decls {
+			switch d := decl.(type) {
+			case *ast.FuncDecl:
+				if d.Recv == nil {
+					decls[d.Name.Name] = true
+				}
+			case *ast.GenDecl:
+				for _, spec := range d.Specs {
+					switch s := spec.(type) {
+					case *ast.ValueSpec:
+						for _, id := range s.Names {
+							decls[id.Name] = true
+						}
+					case *ast.TypeSpec:
+						decls[s.Name.Name] = true
+					}
+				}
+			}
+		}
+	}
+	return decls
 }
 
 func hasCompilerDirective(fn *ast.FuncDecl) bool {
@@ -406,22 +480,24 @@ func hasCompilerDirective(fn *ast.FuncDecl) bool {
 	return false
 }
 
-func validOperand(expr ast.Expr) bool {
+func validOperand(expr ast.Expr, info *types.Info) bool {
 	switch e := expr.(type) {
 	case *ast.Ident, *ast.BasicLit:
 		return true
 	case *ast.ParenExpr:
-		return validOperand(e.X)
+		return validOperand(e.X, info)
 	case *ast.SelectorExpr:
-		return validOperand(e.X)
+		return validOperand(e.X, info)
 	case *ast.IndexExpr:
-		return validOperand(e.X) && validOperand(e.Index)
+		return validOperand(e.X, info) && validOperand(e.Index, info)
 	case *ast.StarExpr:
-		return validOperand(e.X)
+		return validOperand(e.X, info)
 	case *ast.UnaryExpr:
-		return (e.Op == token.ADD || e.Op == token.SUB || e.Op == token.XOR) && validOperand(e.X)
+		return (e.Op == token.ADD || e.Op == token.SUB || e.Op == token.XOR) && validOperand(e.X, info)
 	case *ast.BinaryExpr:
-		return e.Op >= token.ADD && e.Op <= token.AND_NOT && validOperand(e.X) && validOperand(e.Y)
+		return e.Op >= token.ADD && e.Op <= token.AND_NOT && validOperand(e.X, info) && validOperand(e.Y, info)
+	case *ast.CallExpr:
+		return isLenOrCap(e, info) && validOperand(e.Args[0], info)
 	}
 	return false
 }
@@ -432,11 +508,10 @@ func makeIntegerSite(site *Site, expr *ast.BinaryExpr, fn *ast.FuncDecl, pkg *pa
 		return false
 	}
 	variable := expr.X
+	reversed := false
 	if left.Value != nil {
 		left, right = right, left
-		site.Left, site.Right = site.Right, site.Left
-		site.Op = site.Op.Reverse()
-		site.Reversed = true
+		reversed = true
 		variable = expr.Y
 	}
 	basic, ok := left.Type.Underlying().(*types.Basic)
@@ -444,7 +519,16 @@ func makeIntegerSite(site *Site, expr *ast.BinaryExpr, fn *ast.FuncDecl, pkg *pa
 		return false
 	}
 	if right.Value == nil {
-		return types.Identical(left.Type, right.Type)
+		if !types.Identical(left.Type, right.Type) {
+			return false
+		}
+		if reversed {
+			site.Left, site.Right = site.Right, site.Left
+			site.Op = site.Op.Reverse()
+			site.Reversed = true
+		}
+		site.Margin = true
+		return true
 	}
 	if right.Value.Kind() != constant.Int {
 		return false
@@ -457,63 +541,430 @@ func makeIntegerSite(site *Site, expr *ast.BinaryExpr, fn *ast.FuncDecl, pkg *pa
 	if bits <= 0 || bits > 64 {
 		return false
 	}
+	widthMask := uint64(math.MaxUint64) >> (64 - bits)
+	var domain analysis.Domain
 	if basic.Info()&types.IsUnsigned != 0 {
 		value, ok := constant.Uint64Val(right.Value)
 		if !ok {
 			return false
 		}
-		site.Domain = &analysis.Domain{High: math.MaxUint64 >> (64 - bits), Pivot: value}
+		domain = analysis.Domain{High: widthMask, WidthMask: widthMask, Pivot: value}
 	} else {
 		value, ok := constant.Int64Val(right.Value)
 		if !ok {
 			return false
 		}
-		site.Domain = &analysis.Domain{
+		domain = analysis.Domain{
 			Low: analysis.RankSigned(math.MinInt64 >> (64 - bits)), High: analysis.RankSigned(math.MaxInt64 >> (64 - bits)),
-			Pivot: analysis.RankSigned(value), Signed: true,
+			WidthMask: widthMask, Pivot: analysis.RankSigned(value), Signed: true,
 		}
 	}
-	constrainOperand(site.Domain, variable, pkg.TypesInfo)
-	if id, ok := ast.Unparen(variable).(*ast.Ident); ok && directReturn(fn, expr) {
+	if reversed {
+		site.Left, site.Right = site.Right, site.Left
+		site.Op = site.Op.Reverse()
+		site.Reversed = true
+	}
+	site.Domain = &domain
+	constrainOperand(site.Domain, variable, pkg.TypesInfo, bits)
+	if id := directWitnessIdent(variable, pkg.TypesInfo); id != nil && directReturn(fn, expr) {
 		findCallArguments(site, id, fn, pkg.TypesInfo)
 	}
 	return true
 }
 
-func constrainOperand(domain *analysis.Domain, expr ast.Expr, info *types.Info) {
-	binary, ok := ast.Unparen(expr).(*ast.BinaryExpr)
-	if !ok {
+func directWitnessIdent(expr ast.Expr, info *types.Info) *ast.Ident {
+	switch e := ast.Unparen(expr).(type) {
+	case *ast.Ident:
+		return e
+	case *ast.BinaryExpr:
+		if e.Op == token.AND {
+			if info.Types[e.Y].Value != nil {
+				if id, ok := ast.Unparen(e.X).(*ast.Ident); ok {
+					return id
+				}
+			}
+			if info.Types[e.X].Value != nil {
+				if id, ok := ast.Unparen(e.Y).(*ast.Ident); ok {
+					return id
+				}
+			}
+		} else if e.Op == token.AND_NOT && info.Types[e.Y].Value != nil {
+			if id, ok := ast.Unparen(e.X).(*ast.Ident); ok {
+				return id
+			}
+		}
+	}
+	return nil
+}
+
+func makeFloatSite(site *Site, expr *ast.BinaryExpr, info *types.Info) bool {
+	left, right := info.Types[expr.X], info.Types[expr.Y]
+	if left.Type == nil || right.Type == nil || left.Value != nil && right.Value != nil {
+		return false
+	}
+	reversed := false
+	if left.Value != nil {
+		left, right = right, left
+		reversed = true
+	}
+	basic, ok := left.Type.Underlying().(*types.Basic)
+	if !ok || basic.Info()&types.IsFloat == 0 || basic.Info()&types.IsUntyped != 0 {
+		return false
+	}
+	if right.Value == nil {
+		if !types.Identical(left.Type, right.Type) {
+			return false
+		}
+		if reversed {
+			site.Left, site.Right = site.Right, site.Left
+			site.Op = site.Op.Reverse()
+			site.Reversed = true
+		}
+		site.Float = true
+		return true
+	}
+	if right.Value.Kind() != constant.Float && right.Value.Kind() != constant.Int {
+		return false
+	}
+	if rightBasic, ok := right.Type.Underlying().(*types.Basic); !ok ||
+		(rightBasic.Info()&types.IsUntyped == 0 && !types.Identical(left.Type, right.Type)) {
+		return false
+	}
+	if reversed {
+		site.Left, site.Right = site.Right, site.Left
+		site.Op = site.Op.Reverse()
+		site.Reversed = true
+	}
+	site.Float = true
+	return true
+}
+
+func constrainOperand(domain *analysis.Domain, expr ast.Expr, info *types.Info, bits int64) {
+	if attainable, _, ok := computeAttainable(domain, expr, info, bits); ok {
+		domain.Attainable = &attainable
+	}
+}
+
+func isUnconstrainedValueExpr(expr ast.Expr, info *types.Info) bool {
+	e := ast.Unparen(expr)
+	if info.Types[e].Value != nil {
+		return false
+	}
+	switch n := e.(type) {
+	case *ast.Ident:
+		return true
+	case *ast.SelectorExpr:
+		return isUnconstrainedValueExpr(n.X, info)
+	case *ast.StarExpr:
+		return validOperand(n.X, info)
+	}
+	return false
+}
+
+func computeAttainable(domain *analysis.Domain, expr ast.Expr, info *types.Info, bits int64) (analysis.Attainable, bool, bool) {
+	switch e := ast.Unparen(expr).(type) {
+	case *ast.CallExpr:
+		if isLenOrCap(e, info) {
+			if domain.Signed {
+				return analysis.Attainable{Low: analysis.RankSigned(0), High: domain.High}, false, true
+			}
+			return analysis.Attainable{Low: 0, High: domain.High}, false, true
+		}
+	case *ast.BinaryExpr:
+		switch e.Op {
+		case token.AND:
+			value := info.Types[e.Y].Value
+			varExpr := e.X
+			if value == nil {
+				value = info.Types[e.X].Value
+				varExpr = e.Y
+			}
+			bounds, ok := andAttainable(domain, value, false)
+			if !ok {
+				return analysis.Attainable{}, false, false
+			}
+			if isUnconstrainedValueExpr(varExpr, info) {
+				return bounds, true, true
+			}
+			if inner, innerBitwise, innerOK := computeAttainable(domain, varExpr, info, bits); innerOK {
+				bounds.ZeroBits |= inner.ZeroBits
+				tightenBitwiseHigh(domain, &bounds)
+				if !domain.Signed || (inner.Low >= analysis.RankSigned(0) && bounds.Low >= analysis.RankSigned(0)) {
+					if inner.Low > bounds.Low {
+						bounds.Low = inner.Low
+					}
+					if inner.High < bounds.High {
+						bounds.High = inner.High
+					}
+				}
+				if !innerBitwise {
+					bounds.Conservative = true
+				}
+				return bounds, innerBitwise, true
+			}
+			bounds.Conservative = true
+			return bounds, false, true
+		case token.AND_NOT:
+			value := info.Types[e.Y].Value
+			bounds, ok := andAttainable(domain, value, true)
+			if !ok {
+				return analysis.Attainable{}, false, false
+			}
+			if isUnconstrainedValueExpr(e.X, info) {
+				return bounds, true, true
+			}
+			if inner, innerBitwise, innerOK := computeAttainable(domain, e.X, info, bits); innerOK {
+				bounds.ZeroBits |= inner.ZeroBits
+				tightenBitwiseHigh(domain, &bounds)
+				if !domain.Signed || (inner.Low >= analysis.RankSigned(0) && bounds.Low >= analysis.RankSigned(0)) {
+					if inner.Low > bounds.Low {
+						bounds.Low = inner.Low
+					}
+					if inner.High < bounds.High {
+						bounds.High = inner.High
+					}
+				}
+				if !innerBitwise {
+					bounds.Conservative = true
+				}
+				return bounds, innerBitwise, true
+			}
+			bounds.Conservative = true
+			return bounds, false, true
+		case token.SHL:
+			value := info.Types[e.Y].Value
+			if value == nil || value.Kind() != constant.Int {
+				return analysis.Attainable{}, false, false
+			}
+			shift, ok := constant.Int64Val(value)
+			if !ok || shift <= 0 || shift >= bits {
+				return analysis.Attainable{}, false, false
+			}
+			zeroBits := (uint64(1) << shift) - 1
+			var bounds analysis.Attainable
+			if domain.Signed {
+				maxPos := (domain.WidthMask >> 1) & ^zeroBits
+				bounds = analysis.Attainable{Low: domain.Low, High: analysis.RankSigned(int64(maxPos)), ZeroBits: zeroBits}
+			} else {
+				bounds = analysis.Attainable{Low: 0, High: domain.WidthMask & ^zeroBits, ZeroBits: zeroBits}
+			}
+			if isUnconstrainedValueExpr(e.X, info) {
+				return bounds, true, true
+			}
+			if inner, innerBitwise, innerOK := computeAttainable(domain, e.X, info, bits); innerOK {
+				bounds.ZeroBits |= inner.ZeroBits << shift
+				tightenBitwiseHigh(domain, &bounds)
+				if !domain.Signed {
+					if inner.High <= domain.WidthMask>>shift {
+						lo := inner.Low << shift
+						hi := inner.High << shift
+						if lo > bounds.Low {
+							bounds.Low = lo
+						}
+						if hi < bounds.High {
+							bounds.High = hi
+						}
+					}
+				} else if inner.Low >= analysis.RankSigned(0) {
+					maxSigned := domain.WidthMask >> 1
+					loVal := uint64(analysis.UnrankSigned(inner.Low))
+					hiVal := uint64(analysis.UnrankSigned(inner.High))
+					if hiVal <= maxSigned>>shift {
+						lo := analysis.RankSigned(int64(loVal << shift))
+						hi := analysis.RankSigned(int64(hiVal << shift))
+						if lo > bounds.Low {
+							bounds.Low = lo
+						}
+						if hi < bounds.High {
+							bounds.High = hi
+						}
+					}
+				}
+				if !innerBitwise {
+					bounds.Conservative = true
+				}
+				return bounds, innerBitwise, true
+			}
+			bounds.Conservative = true
+			return bounds, false, true
+		case token.REM:
+			value := info.Types[e.Y].Value
+			if value == nil || value.Kind() != constant.Int {
+				return analysis.Attainable{}, false, false
+			}
+			if constant.Sign(value) < 0 {
+				value = constant.UnaryOp(token.SUB, value, 0)
+			}
+			mod, ok := constant.Uint64Val(value)
+			if !ok || mod == 0 {
+				return analysis.Attainable{}, false, false
+			}
+			limit := mod - 1
+			if isUnconstrainedValueExpr(e.X, info) {
+				if !domain.Signed {
+					if limit > domain.High {
+						limit = domain.High
+					}
+					return analysis.Attainable{Low: 0, High: limit}, false, true
+				}
+				hiRank := min(analysis.RankSigned(int64(limit)), domain.High)
+				loRank := max(analysis.RankSigned(-int64(limit)), domain.Low)
+				return analysis.Attainable{Low: loRank, High: hiRank}, false, true
+			}
+			inner, innerBitwise, innerOK := computeAttainable(domain, e.X, info, bits)
+			if innerOK && innerBitwise {
+				if !domain.Signed && mod&(mod-1) == 0 {
+					mask := mod - 1
+					return analysis.Attainable{
+						Low:      0,
+						High:     min(inner.High, mask&^inner.ZeroBits&domain.WidthMask),
+						ZeroBits: ^mask | inner.ZeroBits,
+					}, true, true
+				}
+				if mod <= 1024 {
+					ranks := exactBitwiseRemainderRanks(domain, inner, mod, bits)
+					return analysis.Attainable{
+						Low:        ranks[0],
+						High:       ranks[len(ranks)-1],
+						ExactRanks: ranks,
+					}, false, true
+				}
+			}
+			if !domain.Signed {
+				if limit > domain.High {
+					limit = domain.High
+				}
+				return analysis.Attainable{Low: 0, High: limit, Conservative: true}, false, true
+			}
+			hiRank := min(analysis.RankSigned(int64(limit)), domain.High)
+			loRank := analysis.RankSigned(-int64(limit))
+			if innerOK && inner.Low >= analysis.RankSigned(0) {
+				loRank = analysis.RankSigned(0)
+			}
+			loRank = max(loRank, domain.Low)
+			return analysis.Attainable{Low: loRank, High: hiRank, Conservative: true}, false, true
+		}
+	}
+	return analysis.Attainable{}, false, false
+}
+
+func tightenBitwiseHigh(domain *analysis.Domain, bounds *analysis.Attainable) {
+	free := ^bounds.ZeroBits & domain.WidthMask
+	if !domain.Signed {
+		if free < bounds.High {
+			bounds.High = free
+		}
+		if free == 0 {
+			bounds.Low = 0
+		}
 		return
 	}
-	value := info.Types[binary.Y].Value
-	if value == nil && binary.Op == token.AND {
-		value = info.Types[binary.X].Value
+	signBit := uint64(1) << 63
+	maxPos := analysis.RankSigned(int64(free & (domain.WidthMask >> 1)))
+	if maxPos < bounds.High {
+		bounds.High = maxPos
 	}
+	if free&(domain.WidthMask&^(domain.WidthMask>>1)) == 0 && bounds.Low < signBit {
+		bounds.Low = signBit
+	}
+}
+
+func exactBitwiseRemainderRanks(domain *analysis.Domain, inner analysis.Attainable, mod uint64, bits int64) []uint64 {
+	m := int(mod)
+	freeBits := ^inner.ZeroBits & domain.WidthMask
+	lowMask := domain.WidthMask
+	var signMask uint64
+	if domain.Signed {
+		signMask = uint64(1) << (bits - 1)
+		lowMask = signMask - 1
+	}
+	posRem := make([]bool, m)
+	posRem[0] = true
+	for b := int64(0); b < bits; b++ {
+		bit := uint64(1) << b
+		if bit&lowMask == 0 || freeBits&bit == 0 {
+			continue
+		}
+		weight := int(bit % mod)
+		if weight == 0 {
+			continue
+		}
+		next := slices.Clone(posRem)
+		for r, ok := range posRem {
+			if ok {
+				next[(r+weight)%m] = true
+			}
+		}
+		posRem = next
+	}
+	var ranks []uint64
+	if !domain.Signed {
+		for r, ok := range posRem {
+			if ok {
+				ranks = append(ranks, uint64(r))
+			}
+		}
+		slices.Sort(ranks)
+		return ranks
+	}
+	seen := make(map[uint64]bool, m*2)
+	if inner.High >= analysis.RankSigned(0) {
+		for r, ok := range posRem {
+			if ok {
+				seen[analysis.RankSigned(int64(r))] = true
+			}
+		}
+	}
+	if inner.Low < analysis.RankSigned(0) && freeBits&signMask != 0 {
+		signRem := int(signMask % mod)
+		for r, ok := range posRem {
+			if ok {
+				negMagRem := (signRem - r + m) % m
+				seen[analysis.RankSigned(-int64(negMagRem))] = true
+			}
+		}
+	}
+	if len(seen) == 0 {
+		seen[analysis.RankSigned(0)] = true
+	}
+	for rank := range seen {
+		ranks = append(ranks, rank)
+	}
+	slices.Sort(ranks)
+	return ranks
+}
+
+func andAttainable(domain *analysis.Domain, value constant.Value, invert bool) (analysis.Attainable, bool) {
 	if value == nil || value.Kind() != constant.Int {
-		return
+		return analysis.Attainable{}, false
 	}
-	if binary.Op == token.REM && constant.Sign(value) < 0 {
-		value = constant.UnaryOp(token.SUB, value, 0)
+	if !domain.Signed {
+		mask, ok := constant.Uint64Val(value)
+		if !ok {
+			return analysis.Attainable{}, false
+		}
+		if invert {
+			mask = ^mask
+		}
+		return analysis.Attainable{Low: 0, High: mask & domain.WidthMask, ZeroBits: ^mask}, true
 	}
-	limit, ok := constant.Uint64Val(value)
+	signedMask, ok := constant.Int64Val(value)
 	if !ok {
-		return
+		return analysis.Attainable{}, false
 	}
-	if binary.Op == token.AND {
-		bounds := analysis.Attainable{Low: 0, High: limit, ZeroBits: ^limit}
-		if domain.Signed {
-			bounds.Low, bounds.High = analysis.RankSigned(0), analysis.RankSigned(int64(limit))
+	if invert {
+		signedMask = ^signedMask
+	}
+	um := uint64(signedMask)
+	if signedMask >= 0 {
+		hi := analysis.RankSigned(signedMask)
+		if hi > domain.High {
+			hi = domain.High
 		}
-		domain.Attainable = &bounds
+		return analysis.Attainable{Low: analysis.RankSigned(0), High: hi, ZeroBits: ^um}, true
 	}
-	if binary.Op == token.REM && limit > 0 {
-		limit--
-		bounds := analysis.Attainable{Low: 0, High: limit}
-		if domain.Signed {
-			bounds.Low, bounds.High = analysis.RankSigned(-int64(limit)), analysis.RankSigned(int64(limit))
-		}
-		domain.Attainable = &bounds
-	}
+	maxPos := int64(um & (domain.WidthMask >> 1))
+	return analysis.Attainable{Low: domain.Low, High: analysis.RankSigned(maxPos), ZeroBits: ^um}, true
 }
 
 func stringOperands(expr *ast.BinaryExpr, info *types.Info) bool {
@@ -539,7 +990,7 @@ func directReturn(fn *ast.FuncDecl, expr *ast.BinaryExpr) bool {
 
 func findCallArguments(site *Site, input *ast.Ident, fn *ast.FuncDecl, info *types.Info) {
 	object := info.Uses[input]
-	if object == nil || fn.Type.Params.NumFields() > 8 {
+	if fn.Name.Name == "_" || object == nil || fn.Type.Params.NumFields() > 8 {
 		return
 	}
 	var args []string
@@ -592,4 +1043,143 @@ func operator(op token.Token) analysis.Operator {
 		return analysis.NE
 	}
 	return 0
+}
+
+// ParseIgnoreComments parses // and /* */ tmt:ignore directives into a 1-based line -> reason map.
+func ParseIgnoreComments(fset *token.FileSet, syntax *ast.File, data []byte) map[int]string {
+	if fset == nil || syntax == nil {
+		return nil
+	}
+	positions := fset.File(syntax.Pos())
+	if positions == nil {
+		return nil
+	}
+	type commentDirective struct {
+		startLine, endLine int
+		startOff, endOff   int
+		reason             string
+	}
+	var directives []commentDirective
+	standalone := make(map[int]bool)
+	for _, cg := range syntax.Comments {
+		for _, c := range cg.List {
+			startPos := positions.PositionFor(c.Pos(), false)
+			endPos := positions.PositionFor(c.End()-1, false)
+			startOff := startPos.Offset
+			endOff := positions.Offset(c.End())
+			beforeOnlyWS := isLineWhitespaceBefore(data, startOff)
+			afterOnlyWS := isLineWhitespaceAfter(data, endOff)
+			if startPos.Line == endPos.Line {
+				if beforeOnlyWS && afterOnlyWS {
+					standalone[startPos.Line] = true
+				}
+			} else {
+				if beforeOnlyWS {
+					standalone[startPos.Line] = true
+				}
+				for ln := startPos.Line + 1; ln < endPos.Line; ln++ {
+					standalone[ln] = true
+				}
+				if afterOnlyWS {
+					standalone[endPos.Line] = true
+				}
+			}
+			if reason, ok := parseIgnoreCommentText(c.Text); ok {
+				directives = append(directives, commentDirective{
+					startLine: startPos.Line,
+					endLine:   endPos.Line,
+					startOff:  startOff,
+					endOff:    endOff,
+					reason:    reason,
+				})
+			}
+		}
+	}
+	if len(directives) == 0 {
+		return nil
+	}
+	totalLines := positions.LineCount()
+	ignored := make(map[int]string, len(directives)*2)
+	for _, d := range directives {
+		if !isLineWhitespaceBefore(data, d.startOff) {
+			setIgnoreReason(ignored, d.startLine, d.reason)
+			continue
+		}
+		setIgnoreReason(ignored, d.startLine, d.reason)
+		if d.endLine > d.startLine && !isLineWhitespaceAfter(data, d.endOff) {
+			setIgnoreReason(ignored, d.endLine, d.reason)
+			continue
+		}
+		if d.startLine == d.endLine && !isLineWhitespaceAfter(data, d.endOff) {
+			continue
+		}
+		targetLine := d.endLine + 1
+		for targetLine <= totalLines && standalone[targetLine] {
+			targetLine++
+		}
+		if targetLine <= totalLines {
+			setIgnoreReason(ignored, targetLine, d.reason)
+		}
+	}
+	return ignored
+}
+
+func isLineWhitespaceBefore(data []byte, off int) bool {
+	if off < 0 || off > len(data) {
+		return false
+	}
+	i := off
+	for i > 0 && data[i-1] != '\n' {
+		i--
+	}
+	for _, b := range data[i:off] {
+		if b != ' ' && b != '\t' {
+			return false
+		}
+	}
+	return true
+}
+
+func isLineWhitespaceAfter(data []byte, off int) bool {
+	if off < 0 || off > len(data) {
+		return false
+	}
+	for i := off; i < len(data) && data[i] != '\n'; i++ {
+		if data[i] != ' ' && data[i] != '\t' && data[i] != '\r' {
+			return false
+		}
+	}
+	return true
+}
+
+func parseIgnoreCommentText(text string) (string, bool) {
+	var inner string
+	switch {
+	case strings.HasPrefix(text, "//"):
+		inner = strings.TrimSpace(text[2:])
+	case strings.HasPrefix(text, "/*") && strings.HasSuffix(text, "*/"):
+		inner = strings.TrimSpace(text[2 : len(text)-2])
+	default:
+		return "", false
+	}
+	rest, ok := strings.CutPrefix(inner, "tmt:ignore")
+	if !ok {
+		return "", false
+	}
+	if rest == "" {
+		return "", true
+	}
+	if rest[0] == ':' {
+		return strings.TrimSpace(rest[1:]), true
+	}
+	if rest[0] == ' ' || rest[0] == '\t' || rest[0] == '\n' || rest[0] == '\r' {
+		return strings.TrimSpace(rest), true
+	}
+	return "", false
+}
+
+func setIgnoreReason(ignored map[int]string, line int, reason string) {
+	if existing, ok := ignored[line]; !ok || existing == "" {
+		ignored[line] = reason
+	}
 }

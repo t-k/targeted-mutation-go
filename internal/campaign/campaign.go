@@ -4,8 +4,13 @@ package campaign
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
+	"go/parser"
+	"go/token"
+	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"slices"
@@ -35,6 +40,8 @@ type Config struct {
 	Comparison        string
 	Jobs              int
 	Timeout           time.Duration
+	TimeoutExplicit   bool
+	TimeoutRecheck    string
 	BuildTimeout      time.Duration
 	Full              bool
 	SourceOnly        bool
@@ -46,6 +53,7 @@ type Config struct {
 	ShowUnreached     bool
 	UndoChanges       bool
 	KilledFindings    bool
+	Warn              io.Writer `json:"-"`
 }
 
 type consumer struct {
@@ -63,9 +71,11 @@ type probeJob struct {
 }
 
 type jobResult struct {
-	finding Finding
-	runs    int
-	err     error
+	finding          Finding
+	runs             int
+	err              error
+	activatedChanged bool
+	deadlineExceeded bool
 }
 
 type session struct {
@@ -80,11 +90,13 @@ type session struct {
 	overlay      string
 	replacements []target.Replacement
 	anchors      map[string][]sourceAnchor
+	ignored      map[string]map[int]string
 	shard        shardSelection
 	journal      *checkpoint.Journal[Finding]
 	baselineKey  string
 	testOverlays []target.Replacement
 	virtualDirs  map[string]string
+	testedDeps   map[string]bool
 }
 
 func Run(ctx context.Context, cfg Config) (Report, error) {
@@ -92,8 +104,15 @@ func Run(ctx context.Context, cfg Config) (Report, error) {
 	if cfg.Jobs <= 0 {
 		cfg.Jobs = min(4, runtime.GOMAXPROCS(0))
 	}
+	explicitTimeout := cfg.TimeoutExplicit || cfg.Timeout > 0
 	if cfg.Timeout <= 0 {
 		cfg.Timeout = 30 * time.Second
+	}
+	if cfg.TimeoutRecheck == "" {
+		cfg.TimeoutRecheck = "serial"
+	}
+	if cfg.TimeoutRecheck != "serial" && cfg.TimeoutRecheck != "none" {
+		return report, fmt.Errorf("timeout-recheck must be serial or none")
 	}
 	if cfg.BuildTimeout <= 0 {
 		cfg.BuildTimeout = 5 * time.Minute
@@ -170,11 +189,18 @@ func Run(ctx context.Context, cfg Config) (Report, error) {
 	if err != nil {
 		return report, err
 	}
-	scratch, err := os.MkdirTemp("", "targeted-mutation-go-")
+	rawScratch, err := os.MkdirTemp("", "targeted-mutation-go-")
 	if err != nil {
 		return report, err
 	}
-	defer os.RemoveAll(scratch)
+	defer os.RemoveAll(rawScratch)
+	scratch, err := filepath.Abs(rawScratch)
+	if err != nil {
+		return report, err
+	}
+	if resolvedScratch, evalErr := filepath.EvalSymlinks(scratch); evalErr == nil {
+		scratch = resolvedScratch
+	}
 	s := session{cfg: cfg, env: env, scratch: scratch, packages: packages, testPackages: packages, shard: shard}
 	if testPackages != nil {
 		s.testPackages = testPackages
@@ -186,6 +212,7 @@ func Run(ctx context.Context, cfg Config) (Report, error) {
 			return report, err
 		}
 	}
+	report.WorkspaceDirs = s.collectWorkspaceDirs()
 	s.replacements = s.collect(reversions)
 	report.Sites = len(s.sites)
 	if err := s.validateSnapshots(); err != nil {
@@ -207,18 +234,37 @@ func Run(ctx context.Context, cfg Config) (Report, error) {
 		}
 		defer s.journal.Close()
 	}
-	base := s.goTest(ctx, "", s.testPatterns()...)
+	if len(cfg.TestPatterns) != 0 && (cfg.Full || cfg.SourceOnly || cfg.Audit > 0) {
+		setup, cancel := context.WithTimeout(ctx, cfg.BuildTimeout)
+		s.testedDeps = s.resolveTestedDependencies(setup)
+		cancel()
+	}
+	baselineConfig := s
+	if !explicitTimeout {
+		baselineConfig.cfg.Timeout = min(s.cfg.BuildTimeout, 2*time.Minute)
+	}
+	base := baselineConfig.goTest(ctx, "", s.testPatterns()...)
 	if base.kind != "passed" {
 		return report, fmt.Errorf("ordinary Go test baseline %s:\n%s", base.kind, base.detail)
 	}
+	if s.cfg.TestRun != "" && countRunEvents(base.inventory) == 0 {
+		return report, fmt.Errorf("no tests matched --test %q", s.cfg.TestRun)
+	}
+	if !explicitTimeout {
+		s.cfg.Timeout = max(10*time.Second, 5*time.Second+5*base.elapsed)
+	} else if base.elapsed >= s.cfg.Timeout && s.cfg.Warn != nil {
+		fmt.Fprintf(s.cfg.Warn, "warning: baseline took %s, meeting or exceeding --timeout %s\n",
+			base.elapsed.Round(time.Millisecond), s.cfg.Timeout)
+	}
 	if s.journal != nil {
-		s.baselineKey = stableHash(base.packages, base.inventory)
+		s.baselineKey = canonicalBaselineKey(base.packages, base.inventory)
 	}
 	if err := s.validateSnapshots(); err != nil {
 		return report, err
 	}
 	if len(s.sites)+len(s.sources) == 0 {
 		report.Evaluation = "no-sites"
+		report.Reconcile()
 		return report, nil
 	}
 	if len(s.sites) > 0 {
@@ -238,7 +284,8 @@ func Run(ctx context.Context, cfg Config) (Report, error) {
 		}
 	}
 	reached := s.reachedConsumers()
-	probeJobs := s.plan(&report, reached)
+	var allObserved []Finding
+	probeJobs := s.plan(&report, reached, &allObserved)
 	results := parallel(ctx, cfg.Jobs, len(probeJobs), func(i int) sourceResult {
 		job := probeJobs[i]
 		return s.cachedEdit(job.finding, job.site, job.consumers, func() sourceResult {
@@ -249,15 +296,34 @@ func Run(ctx context.Context, cfg Config) (Report, error) {
 	if err := ctx.Err(); err != nil {
 		return report, err
 	}
-	for _, item := range results {
+	for i := range results {
+		item := &results[i]
 		if item.err != nil {
 			return report, item.err
+		}
+		if item.finding.Status == "timeout" && !item.resumed && s.cfg.TimeoutRecheck == "serial" {
+			if s.cfg.Jobs > 1 {
+				rechecked := s.replay(ctx, probeJobs[i])
+				if rechecked.err != nil {
+					return report, rechecked.err
+				}
+				item.replays += rechecked.runs
+				item.jobResult = rechecked
+			}
+			if item.finding.Status == "timeout" && item.activatedChanged && item.deadlineExceeded {
+				item.finding.Status, item.finding.Detail = "killed", "killed by timeout"
+				item.timedOutKilled = true
+			}
 		}
 		report.Replays += item.replays
 		if item.resumed {
 			report.Resumed++
+			item.finding.StartLine, item.finding.EndLine = probeJobs[i].finding.StartLine, probeJobs[i].finding.EndLine
 		}
-		report.add(item.finding, cfg.KilledFindings)
+		if item.finding.Status != "" {
+			allObserved = append(allObserved, item.finding)
+		}
+		s.recordFinding(&report, item.finding, item.timedOutKilled)
 	}
 	sourceResults := parallel(ctx, cfg.Jobs, len(s.sources), func(i int) sourceResult {
 		job := s.sources[i]
@@ -274,25 +340,62 @@ func Run(ctx context.Context, cfg Config) (Report, error) {
 	if err := ctx.Err(); err != nil {
 		return report, err
 	}
-	for _, item := range sourceResults {
+	for i := range sourceResults {
+		item := &sourceResults[i]
 		if item.err != nil {
 			return report, item.err
+		}
+		job := s.sources[i]
+		if item.finding.Status == "timeout" && !item.resumed && s.cfg.TimeoutRecheck == "serial" && s.cfg.Jobs > 1 {
+			if job.edit != nil && job.edit.Site != nil {
+				serialSession := s
+				serialSession.cfg.Jobs = 1
+				rechecked := serialSession.runSourceComparison(ctx, job, reached[job.edit.Site.ID], base)
+				if rechecked.err != nil {
+					return report, rechecked.err
+				}
+				item.replays += rechecked.replays
+				item.runs += rechecked.runs
+				item.finding = rechecked.finding
+				item.timedOutKilled = rechecked.timedOutKilled
+				if s.journal != nil && checkpointVerdict(item.finding.Status) && !item.timedOutKilled && item.finding.Detail != "killed by timeout" {
+					_ = s.storeCachedFinding(job.finding, job.edit.Site, reached[job.edit.Site.ID], item.finding)
+				}
+			} else {
+				rechecked := s.runSource(ctx, job, base)
+				if rechecked.err != nil {
+					return report, rechecked.err
+				}
+				item.runs += rechecked.runs
+				item.finding = rechecked.finding
+				if s.journal != nil && checkpointVerdict(item.finding.Status) {
+					_ = s.storeCachedFinding(job.finding, nil, nil, item.finding)
+				}
+			}
 		}
 		report.SourceRuns += item.runs
 		report.Replays += item.replays
 		report.Skipped += item.skipped
 		if item.resumed {
 			report.Resumed++
+			item.finding.StartLine, item.finding.EndLine = job.finding.StartLine, job.finding.EndLine
 		}
-		report.add(item.finding, cfg.KilledFindings)
+		if item.finding.Status != "" {
+			allObserved = append(allObserved, item.finding)
+		}
+		s.recordFinding(&report, item.finding, item.timedOutKilled)
 	}
 	if cfg.Audit != 0 {
+		beforeAuditLen := len(report.Findings)
 		if err := s.auditProbes(ctx, &report, probeJobs, results, base); err != nil {
 			return report, err
 		}
+		for _, added := range report.Findings[beforeAuditLen:] {
+			allObserved = append(allObserved, added)
+		}
 	}
 	if len(previous) != 0 {
-		if err := s.comparePrevious(ctx, &report, productionScope, previous, reached); err != nil {
+		if err := s.comparePrevious(ctx, &report, productionScope, previous, reached, allObserved); err != nil {
 			return report, err
 		}
 	}
@@ -307,7 +410,79 @@ func Run(ctx context.Context, cfg Config) (Report, error) {
 		return report, err
 	}
 	slices.SortStableFunc(report.Findings, compareFindings)
+	report.Reconcile()
 	return report, ctx.Err()
+}
+
+func countRunEvents(inventory map[string][]string) int {
+	count := 0
+	for _, events := range inventory {
+		for _, event := range events {
+			if strings.HasPrefix(event, "run:") {
+				count++
+			}
+		}
+	}
+	return count
+}
+
+func (s *session) collectWorkspaceDirs() []string {
+	var dirs []string
+	for _, pkg := range slices.Concat(s.packages, s.testPackages) {
+		if pkg.Dir != "" {
+			dir := pkg.Dir
+			if resolved, err := filepath.EvalSymlinks(dir); err == nil {
+				dir = resolved
+			}
+			dirs = append(dirs, dir)
+		}
+	}
+	slices.Sort(dirs)
+	return slices.Compact(dirs)
+}
+
+func (s *session) resolveTestedDependencies(ctx context.Context) map[string]bool {
+	args := append([]string{"list", "-deps", "-test", "-json"}, s.buildFlags()...)
+	args = append(args, s.testPatterns()...)
+	cmd := exec.CommandContext(ctx, "go", args...)
+	cmd.Env, cmd.Dir = cleanEnv(), s.cfg.Dir
+	configureProcess(cmd)
+	out, err := cmd.Output()
+	cleanupProcess(cmd)
+	if err != nil {
+		return nil
+	}
+	deps := make(map[string]bool)
+	decoder := json.NewDecoder(bytes.NewReader(out))
+	for {
+		var pkg struct{ ImportPath string }
+		if err := decoder.Decode(&pkg); err != nil {
+			break
+		}
+		if pkg.ImportPath != "" {
+			deps[pkg.ImportPath] = true
+		}
+	}
+	return deps
+}
+
+func (s *session) storeCachedFinding(f Finding, site *target.Site, reached []*consumer, result Finding) error {
+	if s.journal == nil {
+		return nil
+	}
+	type observation struct {
+		Package string
+		Summary analysis.Summary
+	}
+	var trace []observation
+	if site != nil {
+		for _, bin := range reached {
+			trace = append(trace, observation{Package: bin.pkg, Summary: bin.seen[site.ID]})
+		}
+		slices.SortFunc(trace, func(a, b observation) int { return strings.Compare(a.Package, b.Package) })
+	}
+	key := stableHash(f.ID, s.baselineKey, trace)
+	return s.journal.Put(key, result)
 }
 
 func (s *session) validateSnapshots() error {
@@ -325,23 +500,38 @@ func (s *session) validateSnapshots() error {
 	return nil
 }
 
+func (s *session) isIgnored(f Finding) bool {
+	lines := s.ignored[f.File]
+	if len(lines) == 0 {
+		return false
+	}
+	_, ok := lines[f.Line]
+	return ok
+}
+
 func (s *session) collect(reverts map[string][]target.Replacement) []target.Replacement {
 	var replacements []target.Replacement
 	s.anchors = make(map[string][]sourceAnchor)
+	s.ignored = make(map[string]map[int]string)
 	for _, pkg := range s.packages {
 		hasSites := false
 		for _, file := range pkg.Files {
-			s.anchors[s.rel(file.Path)] = sourceAnchors(file.Data, file.Owners)
+			rel := s.rel(file.Path)
+			s.anchors[rel] = sourceAnchors(file.Data, file.Owners)
+			if len(file.Ignored) != 0 {
+				s.ignored[rel] = file.Ignored
+			}
 			for i := range file.Edits {
 				edit := &file.Edits[i]
-				finding := Finding{File: s.rel(edit.File), Line: edit.Line, Column: edit.Column,
+				finding := Finding{File: rel, Line: edit.Line, Column: edit.Column,
+					StartLine: edit.StartLine, EndLine: edit.EndLine,
 					Expression: edit.Before, Mutation: edit.After, Rule: edit.Kind}
 				s.identify(&finding)
 				if !s.enabled(finding) {
 					continue
 				}
 				s.sources = append(s.sources, sourceJob{
-					source: file.Data, edit: edit, finding: finding,
+					source: file.Data, edit: edit, finding: finding, pkgPath: pkg.Path,
 				})
 			}
 			if len(file.Sites) == 0 {
@@ -361,15 +551,27 @@ func (s *session) collect(reverts map[string][]target.Replacement) []target.Repl
 			if !slices.Contains(pkg.Paths, entry.Path) {
 				continue
 			}
+			rel := s.rel(entry.Path)
+			if _, loaded := s.ignored[rel]; !loaded {
+				if data, err := os.ReadFile(entry.Path); err == nil {
+					fset := token.NewFileSet()
+					if syntax, err := parser.ParseFile(fset, entry.Path, data, parser.ParseComments|parser.SkipObjectResolution); err == nil {
+						if ig := target.ParseIgnoreComments(fset, syntax, data); len(ig) != 0 {
+							s.ignored[rel] = ig
+						}
+					}
+				}
+			}
 			mutation := entry.Description
 			if mutation == "" {
 				mutation = "restore previous Git hunk"
 			}
-			finding := Finding{File: s.rel(entry.Path), Line: entry.Line, Column: max(1, entry.Column),
+			finding := Finding{File: rel, Line: entry.Line, Column: max(1, entry.Column),
+				StartLine: entry.Line, EndLine: max(entry.Line, entry.EndLine),
 				Rule: "revert", Mutation: mutation}
 			s.identify(&finding)
 			if s.enabled(finding) {
-				s.sources = append(s.sources, sourceJob{replacement: entry, finding: finding})
+				s.sources = append(s.sources, sourceJob{replacement: entry, finding: finding, pkgPath: pkg.Path})
 			}
 		}
 	}
@@ -499,7 +701,7 @@ func (s *session) goTest(ctx context.Context, overlay string, patterns ...string
 func (s *session) goTestCommand(ctx context.Context, overlay string, patterns ...string) commandResult {
 	args := []string{"test", "-json", "-count=1", "-timeout=" + s.cfg.Timeout.String(), "-p=" + strconv.Itoa(s.cfg.Jobs)}
 	if s.cfg.TestRun != "" {
-		args = append(args, "-run="+s.cfg.TestRun)
+		args = append(args, "-run=" + s.cfg.TestRun)
 	}
 	if overlay != "" {
 		// The ordinary baseline has already passed vet. A source mutation can
@@ -522,7 +724,7 @@ func (s *session) reachedConsumers() [][]*consumer {
 	return consumers
 }
 
-func (s *session) plan(report *Report, consumers [][]*consumer) []probeJob {
+func (s *session) plan(report *Report, consumers [][]*consumer, allObserved *[]Finding) []probeJob {
 	var jobs []probeJob
 	for _, site := range s.sites {
 		var seen analysis.Summary
@@ -531,9 +733,10 @@ func (s *session) plan(report *Report, consumers [][]*consumer) []probeJob {
 			seen.Merge(bin.seen[site.ID])
 		}
 		if seen.Flags == 0 {
-			f := Finding{Status: "unreached", File: s.rel(site.File), Line: site.Line, Column: site.Column, Expression: site.Expression}
+			f := Finding{Status: "unreached", File: s.rel(site.File), Line: site.Line, Column: site.Column,
+				StartLine: site.StartLine, EndLine: site.EndLine, Expression: site.Expression}
 			s.identify(&f)
-			if s.enabled(f) {
+			if s.enabled(f) && !s.isIgnored(f) {
 				report.Unreached++
 				if s.cfg.ShowUnreached {
 					report.Findings = append(report.Findings, f)
@@ -544,7 +747,7 @@ func (s *session) plan(report *Report, consumers [][]*consumer) []probeJob {
 		if site.String {
 			continue
 		}
-		for _, candidate := range analysis.Plan(site.Op, site.Domain, seen, !s.cfg.Conventional) {
+		for _, candidate := range analysis.PlanSite(site.Op, site.Domain, site.Margin, site.Float, seen, !s.cfg.Conventional) {
 			if !s.comparisonEnabled(candidate.Kind) {
 				continue
 			}
@@ -555,7 +758,10 @@ func (s *session) plan(report *Report, consumers [][]*consumer) []probeJob {
 			}
 			if job.predicted && !s.cfg.VerifySurvivors && !s.cfg.Conventional {
 				report.Skipped += len(reached)
-				report.add(job.finding, s.cfg.KilledFindings)
+				if allObserved != nil {
+					*allObserved = append(*allObserved, job.finding)
+				}
+				s.recordFinding(report, job.finding, false)
 				jobs = append(jobs, job)
 				continue
 			}
@@ -574,15 +780,31 @@ func (s *session) plan(report *Report, consumers [][]*consumer) []probeJob {
 
 func (s *session) describe(job probeJob, seen analysis.Summary) Finding {
 	site, c := job.site, job.candidate
-	f := Finding{File: s.rel(site.File), Line: site.Line, Column: site.Column, Expression: site.Expression, Rule: c.Kind}
-	f.Mutation = fmt.Sprintf("%s %s %s", site.Left, c.Op, site.Right)
-	if c.Shift != 0 {
+	f := Finding{File: s.rel(site.File), Line: site.Line, Column: site.Column,
+		StartLine: site.StartLine, EndLine: site.EndLine, Expression: site.Expression, Rule: c.Kind}
+	switch {
+	case c.Kind == "margin" && c.Shift < 0:
+		f.Mutation = fmt.Sprintf("%s %s %s - 1 (without overflow)", site.Left, c.Op, site.Right)
+	case c.Kind == "margin" && c.Shift > 0:
+		f.Mutation = fmt.Sprintf("%s %s %s + 1 (without overflow)", site.Left, c.Op, site.Right)
+	case c.Shift != 0 && site.Domain != nil:
 		f.Mutation = fmt.Sprintf("%s %s %s", site.Left, c.Op, rankString(*site.Domain, c.Pivot))
+	default:
+		f.Mutation = fmt.Sprintf("%s %s %s", site.Left, c.Op, site.Right)
 	}
 	s.identify(&f)
 	if job.predicted {
 		f.Status, f.Evidence = "input-gap", "observed"
-		if site.Domain != nil && c.Witness != nil {
+		switch {
+		case c.Kind == "margin":
+			sign := "- 1"
+			if c.Shift > 0 {
+				sign = "+ 1"
+			}
+			f.Detail = fmt.Sprintf("distinguishing margin: %s = %s %s", site.Left, site.Right, sign)
+		case site.Float && c.Kind == "boundary":
+			f.Detail = fmt.Sprintf("operands %s and %s were never equal", site.Left, site.Right)
+		case site.Domain != nil && c.Witness != nil:
 			w := *c.Witness
 			input := rankString(*site.Domain, w)
 			f.Witness = &Witness{Input: input, Operand: site.Left,
@@ -627,6 +849,8 @@ func (s *session) replay(ctx context.Context, job probeJob) jobResult {
 		result.runs++
 		f.Packages = append(f.Packages, bin.pkg)
 		if run.kind != "passed" && run.kind != "failed" {
+			result.activatedChanged = flags&24 == 24
+			result.deadlineExceeded = run.deadlineExceeded || (run.kind == "timeout" && run.elapsed+s.cfg.Timeout/10 >= s.cfg.Timeout)
 			f.Status, f.Detail = run.kind, run.detail
 			return result
 		}
@@ -651,7 +875,20 @@ func (s *session) replay(ctx context.Context, job probeJob) jobResult {
 }
 
 func selector(site *target.Site, candidate analysis.Candidate) string {
-	return fmt.Sprintf("%d:%d:%d:%t", site.ID, candidate.Op.Mask(), candidate.Pivot, candidate.Shift != 0)
+	mask := candidate.Op.Mask()
+	if site.Float {
+		mask = candidate.Op.FloatMask()
+	}
+	mode := "false"
+	switch {
+	case candidate.Kind == "margin" && candidate.Shift < 0:
+		mode = "margin-down"
+	case candidate.Kind == "margin" && candidate.Shift > 0:
+		mode = "margin-up"
+	case candidate.Shift != 0:
+		mode = "true"
+	}
+	return fmt.Sprintf("%d:%d:%d:%s", site.ID, mask, candidate.Pivot, mode)
 }
 
 func (s *session) rel(path string) string {
@@ -675,6 +912,20 @@ func compareFindings(a, b Finding) int {
 		return order
 	}
 	return strings.Compare(a.Mutation, b.Mutation)
+}
+
+func (s *session) recordFinding(r *Report, f Finding, timedOutKilled bool) {
+	if f.Status == "" {
+		return
+	}
+	if isGapStatus(f.Status) && s.isIgnored(f) {
+		r.Suppressed++
+		return
+	}
+	if (timedOutKilled || f.Detail == "killed by timeout") && f.Status == "killed" {
+		r.TimedOut++
+	}
+	r.add(f, s.cfg.KilledFindings)
 }
 
 func (r *Report) add(f Finding, killedFindings bool) {

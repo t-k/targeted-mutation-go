@@ -17,17 +17,22 @@ type sourceJob struct {
 	source      []byte
 	edit        *target.Edit
 	finding     Finding
+	pkgPath     string
 }
 
 type sourceResult struct {
 	jobResult
 	replays, skipped int
 	resumed          bool
+	timedOutKilled   bool
 }
 
 func (s *session) runSourceComparison(ctx context.Context, job sourceJob, reached []*consumer, baseline commandResult) sourceResult {
+	if len(reached) == 0 {
+		return sourceResult{jobResult: s.runSource(ctx, job, baseline)}
+	}
 	site := job.edit.Site
-	candidate := analysis.Candidate{Op: job.edit.Operator, Pivot: job.edit.Pivot, Shift: job.edit.Shift}
+	candidate := analysis.Candidate{Op: job.edit.Operator, Pivot: job.edit.Pivot, Shift: job.edit.Shift, Float: site.Float}
 	probe := probeJob{site: site, candidate: candidate, finding: job.finding}
 	for _, bin := range reached {
 		if candidate.Infects(site.Op, bin.seen[site.ID]) {
@@ -39,10 +44,6 @@ func (s *session) runSourceComparison(ctx context.Context, job sourceJob, reache
 	if probe.predicted && (s.cfg.VerifySurvivors || s.cfg.Conventional) {
 		probe.consumers = reached
 		result.skipped = 0
-		if len(reached) == 0 {
-			result.jobResult = s.runSource(ctx, job, baseline)
-			return result
-		}
 	}
 	probe.finding.Status, probe.finding.Evidence = "source-survivor", "observed"
 	if len(probe.consumers) == 0 {
@@ -60,6 +61,16 @@ func (s *session) runSourceComparison(ctx context.Context, job sourceJob, reache
 	case "assertion-gap":
 		result.finding.Status = "source-survivor"
 	case "source-survivor", "killed":
+	case "timeout":
+		if replayed.activatedChanged && replayed.deadlineExceeded && s.cfg.Jobs == 1 && s.cfg.TimeoutRecheck != "none" {
+			result.finding.Status, result.finding.Detail = "killed", "killed by timeout"
+			result.timedOutKilled = true
+			return result
+		}
+		if s.cfg.Jobs > 1 && s.cfg.TimeoutRecheck != "none" {
+			return result
+		}
+		result.jobResult = s.runSource(ctx, job, baseline)
 	default:
 		// An unconfirmed probe verdict must be resolved using the actual edit.
 		result.jobResult = s.runSource(ctx, job, baseline)
@@ -98,13 +109,41 @@ func (s *session) runSource(ctx context.Context, job sourceJob, baseline command
 		result.err = err
 		return result
 	}
+	overlayFile := filepath.Join(dir, fmt.Sprintf("source-%d.go", len(s.testOverlays)))
 	serial := *s
 	serial.cfg.Jobs = 1
+	needsCompileCheck := len(s.cfg.TestPatterns) != 0 && job.pkgPath != "" && !s.testedDeps[job.pkgPath]
+	if needsCompileCheck {
+		check := serial.compilePackageOverlay(ctx, dir, overlay, job.pkgPath)
+		result.runs++
+		var checkDiags []compilerDiagnostic
+		if check.kind == "build-error" && job.edit != nil {
+			checkDiags = candidateDiagnostics(check, s.cfg.Dir, overlayFile)
+			if repaired := repairUnused(file.Data, overlayFile, checkDiags); repaired != nil {
+				file.Data = repaired
+				if err := os.WriteFile(overlayFile, repaired, 0600); err != nil {
+					result.err = err
+					return result
+				}
+				check = serial.compilePackageOverlay(ctx, dir, overlay, job.pkgPath)
+				result.runs++
+				checkDiags = candidateDiagnostics(check, s.cfg.Dir, overlayFile)
+			}
+		}
+		if check.kind != "passed" {
+			result.finding.Evidence = "source-replay"
+			if check.kind == "build-error" && len(checkDiags) != 0 {
+				result.finding.Status, result.finding.Detail = "non-viable", checkDiags[0].message
+			} else {
+				result.finding.Status, result.finding.Detail = check.kind, check.detail
+			}
+			return result
+		}
+	}
 	run := serial.goTest(ctx, overlay, s.testPatterns()...)
-	result.runs = 1
+	result.runs++
 	var diagnostics []compilerDiagnostic
 	if run.kind == "build-error" && job.edit != nil {
-		overlayFile := filepath.Join(dir, fmt.Sprintf("source-%d.go", len(s.testOverlays)))
 		diagnostics = candidateDiagnostics(run, s.cfg.Dir, overlayFile)
 		if repaired := repairUnused(file.Data, overlayFile, diagnostics); repaired != nil {
 			if err := os.WriteFile(overlayFile, repaired, 0600); err != nil {
@@ -135,4 +174,13 @@ func (s *session) runSource(ctx context.Context, job sourceJob, baseline command
 		f.Status, f.Detail = run.kind, run.detail
 	}
 	return result
+}
+
+func (s *session) compilePackageOverlay(ctx context.Context, dir, overlay, pkgPath string) commandResult {
+	outBin := filepath.Join(dir, "compile-check.test")
+	defer os.Remove(outBin)
+	args := []string{"test", "-json", "-c", "-o", outBin, "-p=1", "-vet=off", "-overlay=" + overlay}
+	args = append(args, s.buildFlags()...)
+	args = append(args, pkgPath)
+	return runCommand(ctx, s.cfg.BuildTimeout, s.cfg.Dir, cleanEnv(), "go", args...)
 }

@@ -28,6 +28,9 @@ func (s *session) auditProbes(ctx context.Context, report *Report, probes []prob
 		if report.Audited == s.cfg.Audit {
 			break
 		}
+		if probe.candidate.Kind == "margin" {
+			continue
+		}
 		if err := ctx.Err(); err != nil {
 			return err
 		}

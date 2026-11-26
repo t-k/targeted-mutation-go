@@ -235,6 +235,103 @@ func TestReportWritersReturnIOFailures(t *testing.T) {
 	}
 }
 
+func TestWriteSARIFResolvesSiblingWorkspaceDirs(t *testing.T) {
+	ws := t.TempDir()
+	workspaceDir := filepath.Join(ws, "workspace")
+	producerDir := filepath.Join(ws, "producer")
+	unrelatedDir := filepath.Join(ws, "unrelated")
+	for _, dir := range []string{workspaceDir, producerDir, unrelatedDir} {
+		if err := os.Mkdir(dir, 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	unicodeLine := `var v = "🎉é"; _ = v`
+	if err := os.WriteFile(filepath.Join(producerDir, "value.go"), []byte("package producer\n"+unicodeLine+"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(unrelatedDir, "secret.go"), []byte("package unrelated\nvar x = 1\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	col := strings.Index(unicodeLine, "_") + 1
+	run := campaign.Report{
+		Schema: 1,
+		Sites:  2,
+		Findings: []campaign.Finding{
+			{Status: "input-gap", File: "../producer/value.go", Line: 2, Column: col, Expression: "v > 0", Mutation: "v >= 0"},
+			{Status: "input-gap", File: "../unrelated/secret.go", Line: 2, Column: 5, Expression: "x > 0", Mutation: "x >= 0"},
+		},
+	}
+
+	var out bytes.Buffer
+	paths := SARIFPaths{
+		ProjectDir:    workspaceDir,
+		RepositoryDir: workspaceDir,
+		WorkspaceDirs: []string{producerDir, filepath.Join(ws, "nonexistent")},
+	}
+	if err := WriteSARIF(&out, run, expressionID, paths); err != nil {
+		t.Fatal(err)
+	}
+	var sarif struct {
+		Runs []struct {
+			OriginalURIBaseIDs map[string]struct{ URI string }
+			Results            []struct {
+				Locations []struct {
+					PhysicalLocation struct {
+						ArtifactLocation struct{ URI, URIBaseID string }
+						Region           struct{ StartLine, StartColumn int }
+					}
+				}
+			}
+		}
+	}
+	decode(t, out.Bytes(), &sarif)
+	if len(sarif.Runs) != 1 || len(sarif.Runs[0].Results) != 2 {
+		t.Fatalf("unexpected SARIF structure: %s", out.String())
+	}
+	s := sarif.Runs[0]
+	base, err := url.Parse(s.OriginalURIBaseIDs[sarifSourceRoot].URI)
+	if err != nil || base.Scheme != "file" || base.Path != filepath.ToSlash(ws)+"/" {
+		t.Fatalf("unexpected %%SRCROOT%% base URI: %+v (%v)", base, err)
+	}
+	if len(s.Results[0].Locations) != 1 {
+		t.Fatalf("expected sibling location, got %+v", s.Results[0].Locations)
+	}
+	loc := s.Results[0].Locations[0].PhysicalLocation
+	if loc.ArtifactLocation.URI != "producer/value.go" || loc.ArtifactLocation.URIBaseID != sarifSourceRoot ||
+		loc.Region.StartLine != 2 || loc.Region.StartColumn != 16 {
+		t.Errorf("unexpected sibling location: %+v", loc)
+	}
+	if len(s.Results[1].Locations) != 0 {
+		t.Errorf("unexpected location for sibling outside WorkspaceDirs: %+v", s.Results[1].Locations)
+	}
+
+	// Symlink inside repository pointing outside must be rejected physically.
+	escapeLink := filepath.Join(workspaceDir, "escape.go")
+	if err := os.Symlink(filepath.Join(unrelatedDir, "secret.go"), escapeLink); err == nil {
+		out.Reset()
+		escapeRun := campaign.Report{
+			Schema:   1,
+			Sites:    1,
+			Findings: []campaign.Finding{{Status: "input-gap", File: "escape.go", Line: 2, Column: 5, Expression: "x > 0", Mutation: "x >= 0"}},
+		}
+		if err := WriteSARIF(&out, escapeRun, expressionID, paths); err != nil {
+			t.Fatal(err)
+		}
+		var escapeSarif struct {
+			Runs []struct {
+				Results []struct {
+					Locations []any
+				}
+			}
+		}
+		decode(t, out.Bytes(), &escapeSarif)
+		if len(escapeSarif.Runs[0].Results[0].Locations) != 0 {
+			t.Fatalf("expected physical symlink escape outside repo/WorkspaceDirs to omit SARIF location: %+v", escapeSarif.Runs[0].Results[0].Locations)
+		}
+	}
+}
+
 func TestBaselineSnapshotRoundTrip(t *testing.T) {
 	file := filepath.Join(t.TempDir(), "baseline.json")
 	findings := []campaign.Finding{{Status: "input-gap", Expression: "z", Line: 1}, {Status: "assertion-gap", Expression: "a"},

@@ -18,10 +18,14 @@ func Rewrite(file *File, prefix string) []byte {
 			result.WriteByte(' ')
 		}
 		compare := "Compare"
+		mask := site.Op.Mask()
 		if site.String {
 			compare = "CompareString"
+		} else if site.Float {
+			compare = "CompareFloat"
+			mask = site.Op.FloatMask()
 		}
-		fmt.Fprintf(&result, "%s%s(%d, %d, %s, %s", prefix, compare, site.ID, site.Op.Mask(), site.Left, site.Right)
+		fmt.Fprintf(&result, "%s%s(%d, %d, %s, %s", prefix, compare, site.ID, mask, site.Left, site.Right)
 		lines := strings.Count(site.Expression, "\n") - strings.Count(site.Left, "\n") - strings.Count(site.Right, "\n")
 		if lines > 0 {
 			result.WriteByte(',')
