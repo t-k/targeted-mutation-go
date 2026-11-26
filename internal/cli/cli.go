@@ -44,7 +44,7 @@ func Execute(ctx context.Context, args []string, out, errOut io.Writer) int {
 	options.IntVar(&cfg.Jobs, "jobs", min(4, runtime.GOMAXPROCS(0)), "maximum concurrent build or mutation workers")
 	options.DurationVar(&cfg.Timeout, "timeout", 30*time.Second, "timeout per test package process")
 	options.DurationVar(&cfg.BuildTimeout, "build-timeout", 5*time.Minute, "timeout per Go build or Go test command")
-	options.BoolVar(&cfg.Full, "full", false, "also run supported source-level operator mutations")
+	options.BoolVar(&cfg.Full, "full", false, "also run the source mutation catalogue")
 	options.BoolVar(&cfg.Conventional, "conventional", false, "run boundary and negation mutations without threshold synthesis")
 	options.BoolVar(&cfg.VerifySurvivors, "verify-survivors", false, "replay comparison mutants whose observations predict survival")
 	options.BoolVar(&cfg.VerifyWitnesses, "verify-witnesses", false, "compile and run synthesized witness tests for direct calls")
@@ -163,8 +163,8 @@ func writeText(out io.Writer, report campaign.Report) error {
 		}
 		text.WriteByte('\n')
 	}
-	fmt.Fprintf(&text, "%d sites, %d test binaries, %d probe replays (%d avoided), %d source runs, %d killed, %d unreached, %d incomplete\n",
-		report.Sites, report.Builds, report.Replays, report.Skipped, report.SourceRuns, report.Killed, report.Unreached, report.Incomplete)
+	fmt.Fprintf(&text, "%d sites, %d test binaries, %d probe replays (%d avoided), %d source runs, %d killed, %d unreached, %d non-viable, %d incomplete\n",
+		report.Sites, report.Builds, report.Replays, report.Skipped, report.SourceRuns, report.Killed, report.Unreached, report.Rejected, report.Incomplete)
 	_, err := io.WriteString(out, text.String())
 	return err
 }

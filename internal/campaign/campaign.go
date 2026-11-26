@@ -210,13 +210,11 @@ func (s *session) collect(reverts map[string][]target.Replacement) []target.Repl
 	for _, pkg := range s.packages {
 		hasSites := false
 		for _, file := range pkg.Files {
-			for _, edit := range file.Edits {
-				mutated := make([]byte, 0, len(file.Data)+len(edit.After)-len(edit.Before))
-				mutated = append(mutated, file.Data[:edit.Start]...)
-				mutated = append(mutated, edit.After...)
-				mutated = append(mutated, file.Data[edit.End:]...)
+			for i := range file.Edits {
+				edit := &file.Edits[i]
 				s.sources = append(s.sources, sourceJob{
-					replacement: target.Replacement{Path: file.Path, Data: mutated},
+					source: file.Data,
+					edit:   edit,
 					finding: Finding{File: s.rel(edit.File), Line: edit.Line, Column: edit.Column,
 						Expression: edit.Before, Mutation: edit.After, Rule: edit.Kind},
 				})
@@ -520,6 +518,8 @@ func (r *Report) add(f Finding, killedFindings bool) {
 			return
 		}
 	case "input-gap", "assertion-gap", "source-survivor", "untested-change":
+	case "non-viable":
+		r.Rejected++
 	default:
 		r.Incomplete++
 	}

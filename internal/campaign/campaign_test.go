@@ -248,3 +248,32 @@ func TestProfileFlagsAndEmptyScopeBaseline(t *testing.T) {
 		}
 	}
 }
+
+func TestFullRunsSourceMutationAfterRepairingUnusedDeclarations(t *testing.T) {
+	dir := t.TempDir()
+	fixture(t, dir, "go.mod", "module example.org/repair\n\ngo 1.26.0\n")
+	fixture(t, dir, "value.go", `package repair
+import "strings"
+func Local() string { value := "data"; return value }
+func Imported() string { return strings.TrimSpace(" valid ") }
+`)
+	fixture(t, dir, "value_test.go", `package repair
+import "testing"
+func TestCalls(t *testing.T) {
+	if Local() != "data" || Imported() != "valid" { t.Fatal("wrong string") }
+}
+`)
+	report, err := Run(context.Background(), Config{Dir: dir, Jobs: 2, Full: true, KilledFindings: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	killed := 0
+	for _, f := range report.Findings {
+		if f.Rule == "return-zero" && f.Status == "killed" {
+			killed++
+		}
+	}
+	if killed != 2 || report.Incomplete != 0 {
+		t.Fatalf("expected both returns to be retested and killed: %+v", report)
+	}
+}

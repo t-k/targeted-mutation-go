@@ -9,6 +9,7 @@ type Report struct {
 	Skipped    int       `json:"replays_avoided"`
 	Killed     int       `json:"killed"`
 	Unreached  int       `json:"unreached"`
+	Rejected   int       `json:"non_viable,omitempty"`
 	Incomplete int       `json:"incomplete"`
 	Findings   []Finding `json:"findings"`
 }
