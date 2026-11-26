@@ -465,6 +465,9 @@ func constrainOperand(domain *analysis.Domain, expr ast.Expr, info *types.Info) 
 	if value == nil || value.Kind() != constant.Int {
 		return
 	}
+	if binary.Op == token.REM && constant.Sign(value) < 0 {
+		value = constant.UnaryOp(token.SUB, value, 0)
+	}
 	limit, ok := constant.Uint64Val(value)
 	if !ok {
 		return

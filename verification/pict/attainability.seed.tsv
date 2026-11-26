@@ -3,6 +3,7 @@ signed-mask	outside	targeted
 unsigned-mask	hole	targeted
 signed-remainder	inside	targeted
 signed-remainder	outside	targeted
+negative-remainder	outside	targeted
 unsigned-remainder	outside	targeted
 unsigned-remainder	outside	conventional
 unbounded	inside	targeted

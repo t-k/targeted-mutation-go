@@ -29,6 +29,8 @@ func TestAttainabilityPICT(t *testing.T) {
 		switch {
 		case strings.HasSuffix(fields[0], "-mask"):
 			lhs = "x & 5"
+		case fields[0] == "negative-remainder":
+			lhs = "x % -3"
 		case strings.HasSuffix(fields[0], "-remainder"):
 			lhs = "x % 3"
 		}
@@ -60,6 +62,34 @@ func TestAttainabilityPICT(t *testing.T) {
 		}
 		if present != (!targeted || fields[1] == "inside") {
 			t.Errorf("%s: boundary candidate present = %t", row, present)
+		}
+	}
+}
+
+func TestAdjacentAttainabilityUsesTheChangedRank(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "go.mod", "module example.org/adjacent\n\ngo 1.26.0\n")
+	write(t, dir, "adjacent.go", `package adjacent
+func Keep(x uint8) bool { return x & 5 >= 2 }
+func Drop(x uint8) bool { return x & 5 >= 3 }
+func Min(x int8) bool { return x % -128 >= -128 }
+`)
+	packages, err := Discover(context.Background(), dir, []string{"."}, "", nil, Discovery{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, site := range packages[0].Files[0].Sites {
+		seen := analysis.Summary{Flags: analysis.Less}
+		if site.Domain.Signed {
+			seen = analysis.Summary{Flags: analysis.Greater, Above: analysis.RankSigned(0)}
+		}
+		var boundary, adjacent bool
+		for _, candidate := range analysis.Plan(site.Op, site.Domain, seen, true) {
+			boundary = boundary || candidate.Kind == "boundary"
+			adjacent = adjacent || candidate.Kind == "threshold"
+		}
+		if boundary || adjacent != (i == 0) {
+			t.Errorf("%s: boundary %t, adjacent %t", site.Expression, boundary, adjacent)
 		}
 	}
 }

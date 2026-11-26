@@ -97,6 +97,10 @@ theorem signed_remainder_bounds (x d : Int) (positive : 0 < d) :
   have hi := Int.tmod_lt_of_pos x positive
   omega
 
+theorem negative_divisor_bounds (x d : Int) (positive : 0 < d) :
+    -(d - 1) ≤ x.tmod (-d) ∧ x.tmod (-d) ≤ d - 1 := by
+  simpa using signed_remainder_bounds x d positive
+
 theorem unsigned_remainder_bounds (x d : Nat) (positive : 0 < d) : x % d ≤ d - 1 := by
   have bound := Nat.mod_lt x positive
   omega
