@@ -168,6 +168,64 @@ func TestCLIProducesVerifiedSuggestions(t *testing.T) {
 	}
 }
 
+func TestCLIFormatsReportsAndSuppressesKnownGaps(t *testing.T) {
+	dir := t.TempDir()
+	const source = "package reports\nfunc Okay(x int) bool { return x >= 1 }\n"
+	writeFiles(t, dir, map[string]string{
+		"go.mod": "module example.org/reports\n\ngo 1.26.0\n", "reports.go": source,
+		"reports_test.go": "package reports\nimport \"testing\"\nfunc Test(t *testing.T) { if !Okay(2) { t.Fatal(\"bad value\") } }\n",
+	})
+	baseline := filepath.Join(dir, "baseline.json")
+	first, code := analyzeJSON(t, dir, "--comparison=boundary", "--write-baseline="+baseline, ".")
+	if code != 2 || len(first.Findings) != 1 || first.Findings[0].ID == "" {
+		t.Fatalf("missing baseline candidate: exit %d, %+v", code, first)
+	}
+	writeFiles(t, dir, map[string]string{"reports.go": "\n// Move the source.\n" + source})
+	filtered, code := analyzeJSON(t, dir, "--comparison=boundary", "--baseline="+baseline, ".")
+	if code != 0 || filtered.Suppressed != 1 || len(filtered.Findings) != 0 {
+		t.Fatalf("known gap not suppressed: exit %d, %+v", code, filtered)
+	}
+	for _, format := range []string{"jsonl", "sarif"} {
+		var stdout, stderr bytes.Buffer
+		code := Execute(context.Background(), []string{"analyze", "--dir", dir, "--comparison=boundary", "--format=" + format, "."}, &stdout, &stderr)
+		if code != 2 || !strings.Contains(stdout.String(), first.Findings[0].ID) {
+			t.Fatalf("%s exit %d, stdout %s, stderr %s", format, code, &stdout, &stderr)
+		}
+		if format == "jsonl" {
+			lines := strings.Split(strings.TrimSpace(stdout.String()), "\n")
+			if len(lines) != 2 || !json.Valid([]byte(lines[0])) || !json.Valid([]byte(lines[1])) {
+				t.Fatalf("invalid JSONL: %s", &stdout)
+			}
+		} else if !json.Valid(stdout.Bytes()) || !strings.Contains(stdout.String(), `"version":"2.1.0"`) &&
+			!strings.Contains(stdout.String(), `"version": "2.1.0"`) {
+			t.Fatalf("invalid SARIF: %s", &stdout)
+		}
+	}
+}
+
+func TestCLIResumesCompletedResultsAndRejectsChangedTests(t *testing.T) {
+	dir := t.TempDir()
+	test := "package resume\nimport \"testing\"\nfunc Test(t *testing.T) { if !Ready(1) { t.Fatal(\"wrong value\") } }\n"
+	writeFiles(t, dir, map[string]string{
+		"go.mod":         "module example.org/resume\n\ngo 1.26.0\n",
+		"resume.go":      "package resume\nfunc Ready(x int) bool { return x >= 1 }\n",
+		"resume_test.go": test,
+	})
+	path := filepath.Join(dir, "outcomes.jsonl")
+	args := []string{"--checkpoint=" + path, "--conventional", "--comparison=boundary", "--show-killed", "."}
+	first, firstExit := analyzeJSON(t, dir, args...)
+	second, secondExit := analyzeJSON(t, dir, args...)
+	if firstExit != 0 || secondExit != 0 || first.Killed != 1 || second.Killed != 1 || first.Replays != 1 || second.Replays != 0 || second.Resumed != 1 {
+		t.Fatalf("first exit %d report %+v, resumed exit %d report %+v", firstExit, first, secondExit, second)
+	}
+	writeFiles(t, dir, map[string]string{"resume_test.go": strings.ReplaceAll(test, "Ready(1)", "Ready(2)")})
+	var stdout, stderr bytes.Buffer
+	code := Execute(context.Background(), append([]string{"analyze", "--dir", dir}, args...), &stdout, &stderr)
+	if code != 1 || !strings.Contains(stderr.String(), "fingerprint") {
+		t.Fatalf("changed tests reused a checkpoint: exit %d, %s %s", code, &stdout, &stderr)
+	}
+}
+
 func TestCLISelectsMutationSitesAndTestsIndependently(t *testing.T) {
 	data, err := os.ReadFile("../../verification/pict/selection.tsv")
 	if err != nil {

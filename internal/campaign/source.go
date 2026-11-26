@@ -20,6 +20,7 @@ type sourceJob struct {
 type sourceResult struct {
 	jobResult
 	replays, skipped int
+	resumed          bool
 }
 
 func (s *session) runSourceComparison(ctx context.Context, job sourceJob, reached []*consumer, baseline commandResult) sourceResult {

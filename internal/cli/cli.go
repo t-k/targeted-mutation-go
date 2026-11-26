@@ -8,12 +8,14 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"os/exec"
 	"runtime"
 	"runtime/debug"
 	"strings"
 	"time"
 
 	"github.com/t-k/targeted-mutation-go/internal/campaign"
+	"github.com/t-k/targeted-mutation-go/internal/reporting"
 )
 
 func Execute(ctx context.Context, args []string, out, errOut io.Writer) int {
@@ -65,18 +67,21 @@ func Execute(ctx context.Context, args []string, out, errOut io.Writer) int {
 	options.BoolVar(&cfg.KilledFindings, "show-killed", false, "include killed mutants in the report")
 	options.BoolVar(&cfg.List, "list", false, "preview mutation candidates without running tests")
 	options.StringVar(&cfg.Shard, "shard", "", "select the zero-based shard K/N")
+	options.StringVar(&cfg.Checkpoint, "checkpoint", "", "resume completed mutations from a campaign journal")
 	options.Func("exclude-rule", "skip a mutation rule (repeatable)", func(value string) error {
 		cfg.ExcludeRules = append(cfg.ExcludeRules, value)
 		return nil
 	})
-	format := options.String("format", "text", "report format (text or json)")
+	format := options.String("format", "text", "report format (text, json, jsonl, or sarif)")
+	baselinePath := options.String("baseline", "", "suppress known findings from this baseline file")
+	writeBaselinePath := options.String("write-baseline", "", "save findings from a complete campaign as a baseline")
 	if err := options.Parse(args[1:]); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return 0
 		}
 		return 1
 	}
-	if *format != "text" && *format != "json" {
+	if *format != "text" && *format != "json" && *format != "jsonl" && *format != "sarif" {
 		fmt.Fprintf(errOut, "invalid report format %q\n", *format)
 		return 1
 	}
@@ -96,6 +101,10 @@ func Execute(ctx context.Context, args []string, out, errOut io.Writer) int {
 		fmt.Fprintln(errOut, "--verify-witnesses is incompatible with --source-only")
 		return 1
 	}
+	if cfg.List && (*baselinePath != "" || *writeBaselinePath != "") {
+		fmt.Fprintln(errOut, "baselines apply to evaluated findings, not --list")
+		return 1
+	}
 	cfg.Patterns = options.Args()
 	for _, pattern := range append(append([]string(nil), cfg.Patterns...), cfg.TestPatterns...) {
 		if strings.HasSuffix(pattern, ".go") {
@@ -107,17 +116,51 @@ func Execute(ctx context.Context, args []string, out, errOut io.Writer) int {
 			return 1
 		}
 	}
+	var baseline reporting.Baseline
+	var err error
+	if *baselinePath != "" {
+		baseline, err = reporting.ReadBaseline(*baselinePath)
+		if err != nil {
+			fmt.Fprintln(errOut, err)
+			return 1
+		}
+	}
 	report, err := campaign.Run(ctx, cfg)
 	if err != nil {
 		fmt.Fprintln(errOut, err)
 		return 1
 	}
-	if *format == "json" {
+	if *writeBaselinePath != "" {
+		if report.Incomplete != 0 {
+			fmt.Fprintln(errOut, "cannot write a baseline from an incomplete campaign")
+		} else if err := reporting.WriteBaseline(*writeBaselinePath, report, findingID); err != nil {
+			fmt.Fprintln(errOut, err)
+			return 1
+		}
+	}
+	if *baselinePath != "" {
+		filtered := report.Findings[:0]
+		for _, finding := range report.Findings {
+			if baseline.Suppresses(finding, findingID) {
+				report.Suppressed++
+			} else {
+				filtered = append(filtered, finding)
+			}
+		}
+		report.Findings = filtered
+	}
+	switch *format {
+	case "json":
 		encoder := json.NewEncoder(out)
 		encoder.SetEscapeHTML(false)
 		encoder.SetIndent("", "  ")
 		err = encoder.Encode(report)
-	} else {
+	case "jsonl":
+		err = reporting.WriteJSONL(out, report, findingID)
+	case "sarif":
+		root, _ := exec.CommandContext(ctx, "git", "-C", cfg.Dir, "rev-parse", "--show-toplevel").Output()
+		err = reporting.WriteSARIF(out, report, findingID, reporting.SARIFPaths{ProjectDir: cfg.Dir, RepositoryDir: strings.TrimSpace(string(root))})
+	default:
 		err = writeText(out, report)
 	}
 	if err != nil {
@@ -128,13 +171,14 @@ func Execute(ctx context.Context, args []string, out, errOut io.Writer) int {
 		return 3
 	}
 	for _, finding := range report.Findings {
-		switch finding.Status {
-		case "input-gap", "assertion-gap", "source-survivor", "untested-change":
+		if reporting.IsGap(finding.Status) {
 			return 2
 		}
 	}
 	return 0
 }
+
+func findingID(f campaign.Finding) string { return f.ID }
 
 func usage(out io.Writer) {
 	fmt.Fprintln(out, "Usage: targeted-mutation-go analyze [flags] [packages...]")

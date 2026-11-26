@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/t-k/targeted-mutation-go/internal/analysis"
+	"github.com/t-k/targeted-mutation-go/internal/checkpoint"
 	"github.com/t-k/targeted-mutation-go/internal/target"
 )
 
@@ -28,6 +29,7 @@ type Config struct {
 	ExcludeRules      []string
 	List              bool
 	Shard             string
+	Checkpoint        string
 	Tags, Since       string
 	Comparison        string
 	Jobs              int
@@ -78,6 +80,8 @@ type session struct {
 	replacements []target.Replacement
 	anchors      map[string][]sourceAnchor
 	shard        shardSelection
+	journal      *checkpoint.Journal[Finding]
+	baselineKey  string
 }
 
 func Run(ctx context.Context, cfg Config) (Report, error) {
@@ -165,12 +169,27 @@ func Run(ctx context.Context, cfg Config) (Report, error) {
 		return report, err
 	}
 	if cfg.List {
+		if cfg.Checkpoint != "" {
+			return report, fmt.Errorf("checkpoint applies to evaluated mutations")
+		}
 		s.preview(&report)
 		return report, ctx.Err()
+	}
+	if cfg.Checkpoint != "" {
+		setup, cancel := context.WithTimeout(ctx, cfg.BuildTimeout)
+		err := s.openCheckpoint(setup)
+		cancel()
+		if err != nil {
+			return report, err
+		}
+		defer s.journal.Close()
 	}
 	base := s.goTest(ctx, "", s.testPatterns()...)
 	if base.kind != "passed" {
 		return report, fmt.Errorf("ordinary Go test baseline %s:\n%s", base.kind, base.detail)
+	}
+	if s.journal != nil {
+		s.baselineKey = stableHash(base.packages, base.inventory)
 	}
 	if err := s.validateSnapshots(); err != nil {
 		return report, err
@@ -197,8 +216,12 @@ func Run(ctx context.Context, cfg Config) (Report, error) {
 	}
 	reached := s.reachedConsumers()
 	probeJobs := s.plan(&report, reached)
-	results := parallel(ctx, cfg.Jobs, len(probeJobs), func(i int) jobResult {
-		return s.replay(ctx, probeJobs[i])
+	results := parallel(ctx, cfg.Jobs, len(probeJobs), func(i int) sourceResult {
+		job := probeJobs[i]
+		return s.cachedEdit(job.finding, job.site, job.consumers, func() sourceResult {
+			result := s.replay(ctx, job)
+			return sourceResult{jobResult: result, replays: result.runs}
+		})
 	})
 	if err := ctx.Err(); err != nil {
 		return report, err
@@ -207,15 +230,23 @@ func Run(ctx context.Context, cfg Config) (Report, error) {
 		if item.err != nil {
 			return report, item.err
 		}
-		report.Replays += item.runs
+		report.Replays += item.replays
+		if item.resumed {
+			report.Resumed++
+		}
 		report.add(item.finding, cfg.KilledFindings)
 	}
 	sourceResults := parallel(ctx, cfg.Jobs, len(s.sources), func(i int) sourceResult {
 		job := s.sources[i]
 		if job.edit != nil && job.edit.Site != nil {
-			return s.runSourceComparison(ctx, job, reached[job.edit.Site.ID], base)
+			site := job.edit.Site
+			return s.cachedEdit(job.finding, site, reached[site.ID], func() sourceResult {
+				return s.runSourceComparison(ctx, job, reached[site.ID], base)
+			})
 		}
-		return sourceResult{jobResult: s.runSource(ctx, job, base)}
+		return s.cachedEdit(job.finding, nil, nil, func() sourceResult {
+			return sourceResult{jobResult: s.runSource(ctx, job, base)}
+		})
 	})
 	if err := ctx.Err(); err != nil {
 		return report, err
@@ -227,6 +258,9 @@ func Run(ctx context.Context, cfg Config) (Report, error) {
 		report.SourceRuns += item.runs
 		report.Replays += item.replays
 		report.Skipped += item.skipped
+		if item.resumed {
+			report.Resumed++
+		}
 		report.add(item.finding, cfg.KilledFindings)
 	}
 	if cfg.SuggestAssertions {
