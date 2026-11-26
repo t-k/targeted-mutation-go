@@ -1,0 +1,5 @@
+Fingerprint	Tail	Results
+same	complete	one
+same	torn	multiple
+same	invalid	multiple
+different	torn	one
