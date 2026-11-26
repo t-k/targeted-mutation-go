@@ -2,6 +2,7 @@ package campaign
 
 import (
 	"context"
+	"maps"
 	"os"
 
 	"github.com/t-k/targeted-mutation-go/internal/target"
@@ -12,7 +13,7 @@ type sourceJob struct {
 	finding     Finding
 }
 
-func (s *session) runSource(ctx context.Context, job sourceJob) jobResult {
+func (s *session) runSource(ctx context.Context, job sourceJob, baseline commandResult) jobResult {
 	result := jobResult{finding: job.finding}
 	dir, err := os.MkdirTemp(s.scratch, "source-")
 	if err != nil {
@@ -33,7 +34,9 @@ func (s *session) runSource(ctx context.Context, job sourceJob) jobResult {
 	f.Evidence = "source-replay"
 	switch run.kind {
 	case "passed":
-		if f.Rule == "revert" {
+		if !maps.Equal(baseline.packages, run.packages) || !maps.EqualFunc(baseline.inventory, run.inventory, sameInventory) {
+			f.Status, f.Detail = "unstable", "source replay ran a different test inventory"
+		} else if f.Rule == "revert" {
 			f.Status = "untested-change"
 		} else {
 			f.Status = "source-survivor"

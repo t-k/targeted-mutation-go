@@ -65,7 +65,7 @@ func (s *session) verifyWitnessGroup(ctx context.Context, report *Report, pkg ta
 	fmt.Fprintf(&source, "package %s\nimport \"testing\"\n", pkg.Name)
 	for i := range jobs {
 		job := &jobs[i]
-		job.test = fmt.Sprintf("Test%sWitness%d", pkg.Prefix, i)
+		job.test = fmt.Sprintf("TestTmt%sWitness%d", pkg.Prefix, i)
 		w := report.Findings[job.index].Witness
 		fmt.Fprintf(&source, "func %s(t *testing.T) {\nif got := %s; got != %t { t.Fatalf(\"witness: got %%v\", got) }\n}\n",
 			job.test, w.Call, w.Original)

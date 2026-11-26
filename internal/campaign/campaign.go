@@ -2,6 +2,7 @@
 package campaign
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"os"
@@ -22,6 +23,7 @@ type Config struct {
 	Dir             string
 	Patterns        []string
 	Tags, Since     string
+	Comparison      string
 	Jobs            int
 	Timeout         time.Duration
 	BuildTimeout    time.Duration
@@ -89,6 +91,9 @@ func Run(ctx context.Context, cfg Config) (Report, error) {
 	if err != nil {
 		return report, err
 	}
+	if cfg.Comparison != "" && cfg.Comparison != "all" && cfg.Comparison != "boundary" && cfg.Comparison != "negation" {
+		return report, fmt.Errorf("comparison must be all, boundary, or negation")
+	}
 	if cfg.UndoChanges && cfg.Since == "" {
 		return report, fmt.Errorf("undo-changes requires since")
 	}
@@ -119,6 +124,9 @@ func Run(ctx context.Context, cfg Config) (Report, error) {
 	s := session{cfg: cfg, env: env, scratch: scratch, packages: packages}
 	s.replacements = s.collect(reversions)
 	report.Sites = len(s.sites)
+	if err := s.validateSnapshots(); err != nil {
+		return report, err
+	}
 	if len(s.sites)+len(s.sources) == 0 {
 		return report, nil
 	}
@@ -128,6 +136,13 @@ func Run(ctx context.Context, cfg Config) (Report, error) {
 		return report, fmt.Errorf("ordinary Go test baseline %s:\n%s", base.kind, base.detail)
 	}
 	if len(s.sites) > 0 {
+		for _, replacement := range s.replacements {
+			if replacement.Synthetic {
+				if _, err := os.Lstat(replacement.Path); !os.IsNotExist(err) {
+					return report, fmt.Errorf("synthetic probe path is occupied: %s", replacement.Path)
+				}
+			}
+		}
 		s.overlay, err = makeOverlay(scratch, s.replacements)
 		if err != nil {
 			return report, err
@@ -151,7 +166,7 @@ func Run(ctx context.Context, cfg Config) (Report, error) {
 		report.add(item.finding, cfg.KilledFindings)
 	}
 	results = parallel(ctx, cfg.Jobs, len(s.sources), func(i int) jobResult {
-		return s.runSource(ctx, s.sources[i])
+		return s.runSource(ctx, s.sources[i], base)
 	})
 	if err := ctx.Err(); err != nil {
 		return report, err
@@ -166,8 +181,26 @@ func Run(ctx context.Context, cfg Config) (Report, error) {
 	if cfg.VerifyWitnesses {
 		s.verifyWitnesses(ctx, &report, probeJobs)
 	}
+	if err := s.validateSnapshots(); err != nil {
+		return report, err
+	}
 	slices.SortStableFunc(report.Findings, compareFindings)
 	return report, ctx.Err()
+}
+
+func (s *session) validateSnapshots() error {
+	for _, pkg := range s.packages {
+		for _, file := range pkg.Files {
+			current, err := os.ReadFile(file.Path)
+			if err != nil {
+				return fmt.Errorf("read source snapshot %s: %w", file.Path, err)
+			}
+			if !bytes.Equal(file.Data, current) {
+				return fmt.Errorf("target source changed during campaign: %s", file.Path)
+			}
+		}
+	}
+	return nil
 }
 
 func (s *session) collect(reverts map[string][]target.Replacement) []target.Replacement {
@@ -238,14 +271,14 @@ func (s *session) prepare(ctx context.Context, base commandResult, report *Repor
 		if run.kind != "passed" {
 			return fmt.Errorf("instrumented baseline %s for %s:\n%s", run.kind, bin.pkg, run.detail)
 		}
-		if !sameInventory(base.inventory[bin.pkg], run.tests) {
+		if !sameInventory(base.inventory[bin.pkg], run.events) {
 			return fmt.Errorf("instrumented baseline ran different test cases in %s", bin.pkg)
 		}
 		data, err := readTrace(trace, len(s.sites))
 		if err != nil {
 			return err
 		}
-		bin.tests = run.tests
+		bin.tests = run.events
 		bin.seen = make(map[int]analysis.Summary)
 		for i := range s.sites {
 			obs := summary(data, i)
@@ -316,15 +349,18 @@ func (s *session) goTest(ctx context.Context, overlay string, patterns ...string
 
 func (s *session) plan(report *Report) []probeJob {
 	var jobs []probeJob
+	consumers := make([][]*consumer, len(s.sites))
+	for i := range s.consumers {
+		bin := &s.consumers[i]
+		for site := range bin.seen {
+			consumers[site] = append(consumers[site], bin)
+		}
+	}
 	for _, site := range s.sites {
 		var seen analysis.Summary
-		var reached []*consumer
-		for i := range s.consumers {
-			bin := &s.consumers[i]
-			if obs, ok := bin.seen[site.ID]; ok {
-				seen.Merge(obs)
-				reached = append(reached, bin)
-			}
+		reached := consumers[site.ID]
+		for _, bin := range reached {
+			seen.Merge(bin.seen[site.ID])
 		}
 		if seen.Flags == 0 {
 			report.Unreached++
@@ -335,6 +371,9 @@ func (s *session) plan(report *Report) []probeJob {
 			continue
 		}
 		for _, candidate := range analysis.Plan(site.Op, site.Domain, seen, !s.cfg.Conventional) {
+			if s.cfg.Comparison != "" && s.cfg.Comparison != "all" && candidate.Kind != s.cfg.Comparison {
+				continue
+			}
 			job := probeJob{site: site, candidate: candidate, predicted: !candidate.Infects(site.Op, seen)}
 			job.finding = s.describe(job, seen)
 			if job.predicted && !s.cfg.VerifySurvivors && !s.cfg.Conventional {
@@ -420,7 +459,7 @@ func (s *session) replay(ctx context.Context, job probeJob) jobResult {
 			f.Status, f.Detail = "unstable", "replay disagreed with baseline observations"
 			return result
 		}
-		if run.kind == "passed" && !sameInventory(bin.tests, run.tests) {
+		if run.kind == "passed" && !sameInventory(bin.tests, run.events) {
 			f.Status, f.Detail = "unstable", "mutation replay ran a different test inventory"
 			return result
 		}

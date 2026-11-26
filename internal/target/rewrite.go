@@ -20,7 +20,7 @@ func Rewrite(file *File, prefix string) []byte {
 			result.WriteByte(',')
 			result.WriteString(strings.Repeat("\n", lines))
 		}
-		result.WriteByte(')')
+		result.WriteString(") != 0")
 		previous = site.End
 	}
 	result.Write(file.Data[previous:])

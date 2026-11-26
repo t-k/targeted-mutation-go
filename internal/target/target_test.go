@@ -24,6 +24,9 @@ func short(a bool, yen int) bool { return a && yen >
 	2 }
 func opaque(f func() int) bool { return f() > 0 }
 func text(s string) bool { return s == "a" }
+func sideEffectInReturn(x int, f func() int) (bool, int) { return x > 0, f() }
+func notEvaluated(p *int) { for range [1]bool{*p > 0} {} }
+func isConstant(p *int) int { return len([1]bool{*p > 0}) }
 `
 	write(t, dir, "shop.go", source)
 	pkgs, err := Discover(context.Background(), dir, []string{"."}, "", nil, false)

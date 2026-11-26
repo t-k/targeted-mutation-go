@@ -24,6 +24,7 @@ type commandResult struct {
 	detail    string
 	failed    []string
 	tests     []string
+	events    []string
 	inventory map[string][]string
 	packages  map[string]string
 }
@@ -85,12 +86,12 @@ func runCommand(ctx context.Context, limit time.Duration, dir string, env []stri
 	cmd := exec.CommandContext(ctx, path, args...)
 	cmd.Dir = dir
 	cmd.Env = append(env, "PWD="+dir)
-	var output commandOutput
+	output := commandOutput{direct: filepath.IsAbs(path)}
 	cmd.Stdout, cmd.Stderr = &output, &output
 	configureProcess(cmd)
 	err := cmd.Run()
 	output.finish()
-	result := commandResult{detail: strings.TrimSpace(output.tail.String()), failed: output.failed, tests: output.tests, inventory: output.inventory, packages: output.packages}
+	result := commandResult{detail: strings.TrimSpace(output.tail.String()), failed: output.failed, tests: output.tests, events: output.events, inventory: output.inventory, packages: output.packages}
 	switch {
 	case ctx.Err() == context.DeadlineExceeded:
 		result.kind = "timeout"
@@ -122,6 +123,8 @@ type commandOutput struct {
 	discardLine bool
 	failed      []string
 	tests       []string
+	events      []string
+	direct      bool
 	inventory   map[string][]string
 	packages    map[string]string
 	buildFailed bool
@@ -169,43 +172,72 @@ func (o *commandOutput) finish() {
 	if line == "" {
 		return
 	}
-	line = strings.TrimPrefix(line, "\x16")
-	switch {
-	case strings.HasPrefix(line, "--- FAIL: "):
-		name, _, _ := strings.Cut(strings.TrimPrefix(line, "--- FAIL: "), " ")
-		o.failed = append(o.failed, name)
-	case strings.HasPrefix(line, "=== RUN   "):
-		o.tests = append(o.tests, strings.TrimSpace(strings.TrimPrefix(line, "=== RUN   ")))
-	case strings.HasPrefix(line, "panic: test timed out"):
-		o.timedOut = true
-	case line[0] == '{':
-		var event struct {
-			Action, Test, Package, FailedBuild, Output string
+	if o.direct {
+		o.recordBinary(line)
+		return
+	}
+	if line[0] != '{' {
+		return
+	}
+	var event struct {
+		Action, Test, Package, FailedBuild, Output string
+	}
+	if json.Unmarshal([]byte(line), &event) != nil {
+		return
+	}
+	if event.FailedBuild != "" || event.Action == "build-fail" {
+		o.buildFailed = true
+	}
+	if event.Test == "" && (event.Action == "pass" || event.Action == "skip" || event.Action == "fail") {
+		if o.packages == nil {
+			o.packages = make(map[string]string)
 		}
-		if json.Unmarshal([]byte(line), &event) != nil {
-			return
-		}
-		if event.FailedBuild != "" || event.Action == "build-fail" {
-			o.buildFailed = true
-		}
-		if event.Action == "fail" && event.Test != "" {
-			o.failed = append(o.failed, event.Test)
-		}
-		if event.Action == "run" && event.Test != "" {
+		o.packages[event.Package] = event.Action
+	}
+	if event.Test != "" {
+		switch event.Action {
+		case "run", "pass", "skip", "fail":
 			if o.inventory == nil {
 				o.inventory = make(map[string][]string)
 			}
-			o.inventory[event.Package] = append(o.inventory[event.Package], event.Test)
-		}
-		if event.Test == "" && (event.Action == "pass" || event.Action == "skip" || event.Action == "fail") {
-			if o.packages == nil {
-				o.packages = make(map[string]string)
+			o.inventory[event.Package] = append(o.inventory[event.Package], event.Action+":"+event.Test)
+			if event.Action == "fail" {
+				o.failed = append(o.failed, event.Test)
 			}
-			o.packages[event.Package] = event.Action
 		}
-		if strings.HasPrefix(event.Output, "panic: test timed out") {
-			o.timedOut = true
+	}
+	if strings.HasPrefix(event.Output, "panic: test timed out") {
+		o.timedOut = true
+	}
+}
+
+func (o *commandOutput) recordBinary(line string) {
+	if strings.HasPrefix(line, "panic: test timed out") {
+		o.timedOut = true
+		return
+	}
+	_, framed, ok := strings.Cut(line, "\x16")
+	if !ok {
+		return
+	}
+	framed = strings.TrimLeft(framed, " \t")
+	if test, ok := strings.CutPrefix(framed, "=== RUN   "); ok {
+		test = strings.TrimSpace(test)
+		o.tests = append(o.tests, test)
+		o.events = append(o.events, "run:"+test)
+		return
+	}
+	for _, status := range []string{"PASS", "SKIP", "FAIL"} {
+		test, ok := strings.CutPrefix(framed, "--- "+status+": ")
+		if !ok {
+			continue
 		}
+		test, _, _ = strings.Cut(test, " ")
+		o.events = append(o.events, strings.ToLower(status)+":"+test)
+		if status == "FAIL" {
+			o.failed = append(o.failed, test)
+		}
+		return
 	}
 }
 

@@ -108,3 +108,100 @@ func fixture(t *testing.T, dir, name, contents string) {
 		t.Fatal(err)
 	}
 }
+
+func TestCampaignKeepsNamedBoolAndIgnoresTestLikeStdout(t *testing.T) {
+	dir := t.TempDir()
+	fixture(t, dir, "go.mod", "module example.org/named\n\ngo 1.26.0\n")
+	fixture(t, dir, "named.go", `package named
+type Flag bool
+func Ready(n int) Flag { return n > 0 }
+`)
+	fixture(t, dir, "named_test.go", `package named
+import ("fmt"; "testing")
+func TestReady(t *testing.T) {
+	fmt.Println("=== RUN   sample")
+	fmt.Println("--- FAIL: fabricated (0.00s)")
+	if !Ready(1) { t.Fatal("expected ready") }
+}
+`)
+	report, err := Run(context.Background(), Config{Dir: dir, VerifySurvivors: true})
+	if err != nil || report.Killed != 1 || report.Incomplete != 0 {
+		t.Fatalf("named bool/stdout was not preserved: %+v, %v", report, err)
+	}
+}
+
+func TestCampaignRejectsMutationsThatSuppressTests(t *testing.T) {
+	dir := t.TempDir()
+	fixture(t, dir, "go.mod", "module example.org/suppress\n\ngo 1.26.0\n")
+	fixture(t, dir, "check.go", `package suppress
+func Start(a, b bool) bool { return a || b }
+func Gate(n int) bool { return n >= 0 }
+`)
+	fixture(t, dir, "check_test.go", `package suppress
+import ("os"; "testing")
+func TestMain(m *testing.M) {
+	if !Start(true, false) { os.Exit(0) }
+	os.Exit(m.Run())
+}
+func TestGate(t *testing.T) {
+	if !Gate(0) { t.Skip("gate skipped the assertion") }
+}
+`)
+	report, err := Run(context.Background(), Config{Dir: dir, Full: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var source, probe int
+	for _, finding := range report.Findings {
+		if finding.Status == "unstable" && finding.Rule == "source-operator" {
+			source++
+		}
+		if finding.Status == "unstable" && (finding.Rule == "boundary" || finding.Rule == "negation") {
+			probe++
+		}
+	}
+	if source != 1 || probe != 2 {
+		t.Fatalf("suppressed tests were not detected: %+v", report)
+	}
+}
+
+func TestCampaignScopesAndRevertsGitHunks(t *testing.T) {
+	dir := t.TempDir()
+	ctx := context.Background()
+	fixture(t, dir, "go.mod", "module example.org/git\n\ngo 1.26.0\n")
+	original := `package changes
+func Scope(n int) bool { return n >= 2 }
+func Unchanged(n int) bool { return n >= 4 }
+`
+	fixture(t, dir, "changes.go", original)
+	fixture(t, dir, "changes_test.go", `package changes
+import "testing"
+func TestScope(t *testing.T) {
+	if Scope(0) || !Scope(9) { t.Fatal("wrong scope") }
+}
+`)
+	for _, args := range [][]string{
+		{"init", "-b", "main"}, {"add", "."},
+		{"-c", "user.name=Fixture", "-c", "user.email=fixture@example.org", "-c", "commit.gpgsign=false", "commit", "-m", "baseline"},
+	} {
+		if _, err := git(ctx, dir, args...); err != nil {
+			t.Fatal(err)
+		}
+	}
+	changed := strings.Replace(original, ">= 2", ">= 3", 1)
+	fixture(t, dir, "changes.go", changed)
+	fixture(t, dir, "added.go", "package changes\nfunc Added(n int) bool { return n >= 5 }\n")
+	report, err := Run(ctx, Config{Dir: dir, Since: "HEAD", UndoChanges: true, ShowUnreached: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Sites != 2 || report.SourceRuns != 1 || report.Unreached != 1 {
+		t.Fatalf("incorrect diff scope: %+v", report)
+	}
+	for _, finding := range report.Findings {
+		if finding.Status == "untested-change" && finding.File == "changes.go" && finding.Line == 2 {
+			return
+		}
+	}
+	t.Fatalf("missing Git revert survivor: %+v", report)
+}

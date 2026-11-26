@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"go/ast"
 	"go/constant"
+	"go/parser"
 	"go/token"
 	"go/types"
 	"math"
@@ -14,6 +15,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 
 	"github.com/t-k/targeted-mutation-go/internal/analysis"
 	"golang.org/x/tools/go/packages"
@@ -67,7 +69,12 @@ type Edit struct {
 }
 
 func Discover(ctx context.Context, dir string, patterns []string, tags string, scope Scope, full bool) ([]Package, error) {
+	var contents sync.Map
 	cfg := &packages.Config{
+		ParseFile: func(fset *token.FileSet, path string, data []byte) (*ast.File, error) {
+			contents.Store(path, data)
+			return parser.ParseFile(fset, path, data, parser.ParseComments|parser.SkipObjectResolution)
+		},
 		Context: ctx,
 		Dir:     dir,
 		Mode: packages.NeedName | packages.NeedFiles | packages.NeedCompiledGoFiles |
@@ -99,7 +106,7 @@ func Discover(ctx context.Context, dir string, patterns []string, tags string, s
 		if pkg.Module != nil && !pkg.Module.Main {
 			return nil, fmt.Errorf("package %s is outside the main module or workspace", pkg.PkgPath)
 		}
-		portable := pkg.Module == nil || pkg.Module.GoVersion == "" || versionSupportsProbes(pkg.Module.GoVersion)
+		portable := (pkg.Module == nil || pkg.Module.GoVersion == "" || versionSupportsProbes(pkg.Module.GoVersion)) && runtimeNamesAvailable(pkg.Types.Scope())
 		slices.SortFunc(pkg.Syntax, func(a, b *ast.File) int {
 			return strings.Compare(pkg.Fset.PositionFor(a.Pos(), false).Filename, pkg.Fset.PositionFor(b.Pos(), false).Filename)
 		})
@@ -109,10 +116,11 @@ func Discover(ctx context.Context, dir string, patterns []string, tags string, s
 			if !slices.Contains(pkg.GoFiles, path) || ast.IsGenerated(syntax) {
 				continue
 			}
-			data, err := os.ReadFile(path)
-			if err != nil {
-				return nil, fmt.Errorf("read %s: %w", path, err)
+			snapshot, ok := contents.Load(path)
+			if !ok {
+				return nil, fmt.Errorf("missing parsed source for %s", path)
 			}
+			data := snapshot.([]byte)
 			file := &File{Path: path, Data: data}
 			findSites(file, syntax, astFile, pkg, scope, full, portable)
 			if len(file.Sites)+len(file.Edits) > 0 {
@@ -148,36 +156,138 @@ func findSites(file *File, tree *ast.File, positions *token.File, pkg *packages.
 		if !ok || fn.Body == nil || hasCompilerDirective(fn) {
 			continue
 		}
-		ast.Inspect(fn.Body, func(node ast.Node) bool {
-			if expr, ok := node.(ast.Expr); ok && pkg.TypesInfo.Types[expr].Value != nil {
+		findFunctionSites(file, fn, positions, pkg, scope, full, probes, text)
+	}
+}
+
+func findFunctionSites(file *File, fn *ast.FuncDecl, positions *token.File, pkg *packages.Package, scope Scope, full, probes bool, text func(ast.Node) string) {
+	var stack []ast.Node
+	safety := make(map[ast.Stmt]bool)
+	ast.Inspect(fn.Body, func(node ast.Node) (visit bool) {
+		if node == nil {
+			stack = stack[:len(stack)-1]
+			return false
+		}
+		defer func() {
+			if visit {
+				stack = append(stack, node)
+			}
+		}()
+		if expr, ok := node.(ast.Expr); ok && pkg.TypesInfo.Types[expr].Value != nil {
+			return false
+		}
+		switch expr := node.(type) {
+		case *ast.BinaryExpr:
+			pos := positions.PositionFor(expr.OpPos, false)
+			if !scope.Contains(file.Path, pos.Line, pos.Line) {
+				return true
+			}
+			op := operator(expr.Op)
+			if probes && op != 0 && safeStatement(stack, pkg.TypesInfo, safety) && validOperand(expr.X) && validOperand(expr.Y) && pkg.TypesInfo.Types[expr].Value == nil {
+				start := positions.PositionFor(expr.Pos(), false)
+				site := &Site{
+					File: file.Path, Line: pos.Line, Column: pos.Column,
+					Start: start.Offset, End: positions.Offset(expr.End()), Op: op,
+					Left: text(expr.X), Right: text(expr.Y), Expression: text(expr),
+				}
+				if makeIntegerSite(site, expr, fn, pkg) {
+					file.Sites = append(file.Sites, site)
+					return false
+				}
+			}
+			if full {
+				appendEdits(file, positions, expr.OpPos, expr.Op, pkg.TypesInfo.Types[expr].Value == nil)
+			}
+		}
+		return true
+	})
+}
+
+func safeStatement(ancestors []ast.Node, info *types.Info, cache map[ast.Stmt]bool) bool {
+	for i := len(ancestors) - 1; i >= 0; i-- {
+		stmt, ok := ancestors[i].(ast.Stmt)
+		if !ok {
+			continue
+		}
+		if value, checked := cache[stmt]; checked {
+			return value
+		}
+		value := safeEvaluation(stmt, info)
+		cache[stmt] = value
+		return value
+	}
+	return false
+}
+
+func safeEvaluation(stmt ast.Stmt, info *types.Info) bool {
+	var nodes []ast.Node
+	switch s := stmt.(type) {
+	case *ast.IfStmt:
+		nodes = []ast.Node{s.Cond}
+	case *ast.ForStmt:
+		if s.Cond != nil {
+			nodes = []ast.Node{s.Cond}
+		}
+	case *ast.SwitchStmt:
+		if s.Tag != nil {
+			nodes = []ast.Node{s.Tag}
+		}
+	case *ast.CaseClause:
+		for _, expr := range s.List {
+			nodes = append(nodes, expr)
+		}
+	case *ast.RangeStmt:
+		blank, isIdent := s.Value.(*ast.Ident)
+		if s.Value == nil || isIdent && blank.Name == "_" {
+			typ := info.TypeOf(s.X)
+			if typ == nil {
 				return false
 			}
-			switch expr := node.(type) {
-			case *ast.BinaryExpr:
-				pos := positions.PositionFor(expr.OpPos, false)
-				if !scope.Contains(file.Path, pos.Line, pos.Line) {
-					return true
-				}
-				op := operator(expr.Op)
-				if probes && op != 0 && validOperand(expr.X) && validOperand(expr.Y) && pkg.TypesInfo.Types[expr].Value == nil {
-					start := positions.PositionFor(expr.Pos(), false)
-					site := &Site{
-						File: file.Path, Line: pos.Line, Column: pos.Column,
-						Start: start.Offset, End: positions.Offset(expr.End()), Op: op,
-						Left: text(expr.X), Right: text(expr.Y), Expression: text(expr),
-					}
-					if makeIntegerSite(site, expr, fn, pkg) {
-						file.Sites = append(file.Sites, site)
-						return false
-					}
-				}
-				if full {
-					appendEdits(file, positions, expr.OpPos, expr.Op, pkg.TypesInfo.Types[expr].Value == nil)
-				}
+			if _, parameter := typ.(*types.TypeParam); parameter {
+				return false
 			}
-			return true
+			kind := typ.Underlying()
+			if pointer, ok := kind.(*types.Pointer); ok {
+				kind = pointer.Elem().Underlying()
+			}
+			if _, array := kind.(*types.Array); array {
+				return false
+			}
+		}
+		nodes = []ast.Node{s.X}
+	case *ast.ReturnStmt, *ast.AssignStmt, *ast.DeclStmt:
+		nodes = []ast.Node{stmt}
+	default:
+		return false
+	}
+	safe := true
+	for _, node := range nodes {
+		ast.Inspect(node, func(node ast.Node) bool {
+			if expression, ok := node.(ast.Expr); ok && info.Types[expression].Value != nil {
+				return false
+			}
+			switch child := node.(type) {
+			case *ast.FuncLit:
+				return false
+			case *ast.CallExpr:
+				// A conversion is not a function evaluation.
+				safe = safe && info.Types[child.Fun].IsType()
+			case *ast.UnaryExpr:
+				safe = safe && child.Op != token.ARROW
+			}
+			return safe
 		})
 	}
+	return safe
+}
+
+func runtimeNamesAvailable(scope *types.Scope) bool {
+	for _, name := range strings.Fields("int int8 int16 int32 int64 uint uint8 uint16 uint32 uint64 uintptr bool nil len panic") {
+		if scope.Lookup(name) != nil {
+			return false
+		}
+	}
+	return true
 }
 
 func hasCompilerDirective(fn *ast.FuncDecl) bool {
