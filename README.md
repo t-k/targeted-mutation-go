@@ -242,6 +242,24 @@ targeted-mutation-go analyze --full --shard 0/4 --format jsonl ./...
 targeted-mutation-go analyze --full --checkpoint .tmt-campaign.jsonl --audit 5 ./...
 ```
 
+### Project configuration (`.tmt.toml`)
+
+Place a `.tmt.toml` in `--dir` (auto-loaded unless `--no-config` is passed, or specify `--config <FILE>`). Explicit CLI flags and positional package patterns always override `.tmt.toml`:
+
+```toml
+[analyze]
+patterns = ["./internal/..."]
+full = true
+jobs = 4
+timeout = "30s"
+format = "sarif"
+baseline = ".tmt-baseline.json"
+exclude_rules = [
+  "negation",
+  "empty-block",
+]
+```
+
 ### How `--since` and `--undo-changes` work on pull requests
 
 - **Diff-scoped findings (`--since REV`):** Restricts ordinary findings and summary counters to full AST spans intersecting changed lines in tracked `.go` files plus untracked `.go` files (intersected with `--lines` when both are given).
@@ -257,6 +275,8 @@ Flags and package patterns may appear in any order (`targeted-mutation-go analyz
 | Flag | Default | Description |
 | --- | --- | --- |
 | `--dir <DIR>` | `.` | Project or Go workspace directory |
+| `--config <FILE>` | `<dir>/.tmt.toml` | Path to a `.tmt.toml` configuration file (auto-loaded from `--dir` when present; CLI flags always override) |
+| `--no-config` | `false` | Disable automatic `.tmt.toml` loading (mutually exclusive with `--config`) |
 | `--since <REV>` | — | Restrict ordinary findings to lines changed since Git `<REV>` and check modified tests for weakening |
 | `--undo-changes` | `false` | Restore modified tracked Go hunks and matched AST sub-hunks to `--since` (requires `--since`) |
 | `--lines <SPEC>` | — | Restrict mutations to `FILE`, `FILE:LINE`, or `FILE:FROM-TO` (repeatable; intersects `--since`) |
@@ -323,7 +343,7 @@ flowchart LR
 2. **Dual baseline verification & adaptive timeout.** Runs `go test -json -count=1` (including default `go vet`), derives an adaptive per-package timeout (`5s + 5×test_runtime` from `go test -json` package execution durations when `--timeout` is unset), compiles one instrumented `.test` binary per non-skipped consumer package inside a temporary `go -overlay`, and verifies identical test inventories.
 3. **Lock-free shared-memory tracing.** During the baseline run, each comparison site updates a 40-byte `mmap` slot (`Flags` including IEEE-754 `Unordered` bit `32` for `NaN`, `Below`, `~Above`, `~BelowGap`, `~AboveGap`) using Go 1.18-compatible `sync/atomic` compare-and-swap loops, mapping signed integers to monotonic `uint64` ranks via `uint64(v) ^ (1 << 63)`.
 4. **Interval/margin planning, verified activation & process cleanup.** From recorded extrema and rank gaps, the planner computes observation-equivalent threshold intervals (clamped to attainable bounds and jumping across impossible bitmask holes and exact small-modulus remainders) and overflow-free variable-RHS margins (`a >= b ± 1`), skipping provable survivors (`observed`). Remaining candidates run with `-failfast` in dedicated process groups (`Setpgid`) with private `mmap` traces; process groups (`pid > 1`) are terminated (`SIGKILL`) after every normal or timed-out exit. Parallel timeouts are rechecked serially (`--timeout-recheck serial`), and confirmed probe and source test timeouts are counted as `killed` (`timed_out`).
-5. **Hybrid `--full` routing, schemata, bound pruning & source repair.** Reached `--full` comparison operator swaps (excluding Lean-proved min/max-bound equivalent swaps such as `s == ""` ↔ `s <= ""`, `len(x) != 0` ↔ `len(x) > 0`, `uint8 == 255` ↔ `uint8 >= 255`, and excluding struct reflection tags), integer arithmetic/bitwise schemata (`+`, `-`, `*`, `/`, `%`, `&`, `|`, `^`, `&^`), `±1` literal steps, `!(cond)` negations (excluding ordered float comparisons where `NaN` semantics differ), and side-effect-free `true`/`false` comparison replacements reuse prebuilt probe binaries, falling back to isolated source overlays when unreached or unconfirmed. Source overlays retry once when an edit leaves an unused local variable (`_ = &x`) or import (`_ "pkg"`).
+5. **Hybrid `--full` routing, schemata, bound pruning & source repair.** Reached `--full` comparison operator swaps (excluding Lean-proved min/max-bound equivalent swaps such as `s == ""` ↔ `s <= ""`, `len(x) != 0` ↔ `len(x) > 0`, `uint8 == 255` ↔ `uint8 >= 255`, and excluding struct reflection tags), integer arithmetic/bitwise schemata (`+`, `-`, `*`, `/`, `%`, `&`, `|`, `^`, `&^`), boolean schemata (`remove-not`, `boolean-literal`, non-numeric `==`/`!=` including `err != nil`, `condition-negation`, and side-effect-free `condition-constant`/`error-check`), `±1` literal steps, `!(cond)` negations (excluding ordered float comparisons where `NaN` semantics differ), and side-effect-free `true`/`false` comparison replacements reuse prebuilt probe binaries, falling back to isolated source overlays when unreached or unconfirmed. Source overlays retry once when an edit leaves an unused local variable (`_ = &x`) or import (`_ "pkg"`).
 
 ---
 

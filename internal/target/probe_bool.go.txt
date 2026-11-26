@@ -1,0 +1,29 @@
+
+func PROBEBool(site int, value bool) bool {
+	state := PROBEGetState()
+	if state.slots == nil || site < 0 || site*5+5 > len(state.slots) {
+		return value
+	}
+	if state.site >= 0 {
+		if state.site != site {
+			return value
+		}
+		mut := value
+		switch state.mask {
+		case 1:
+			mut = !value
+		case 2:
+			mut = false
+		case 3:
+			mut = true
+		}
+		flags := uint64(8)
+		if mut != value {
+			flags |= 16
+		}
+		PROBERecord(&state.slots[site*5], flags)
+		return mut
+	}
+	PROBERecord(&state.slots[site*5], 1)
+	return value
+}

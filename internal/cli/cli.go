@@ -9,6 +9,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
@@ -91,6 +92,8 @@ func Execute(ctx context.Context, args []string, out, errOut io.Writer) int {
 	format := options.String("format", "text", "report format (text, json, jsonl, or sarif)")
 	baselinePath := options.String("baseline", "", "suppress known findings from this baseline file")
 	writeBaselinePath := options.String("write-baseline", "", "save findings from a complete campaign as a baseline")
+	configPath := options.String("config", "", "path to a .tmt.toml configuration file")
+	noConfig := options.Bool("no-config", false, "disable automatic .tmt.toml loading")
 	reordered, reorderErr := reorderAnalyzeArgs(options, args[1:])
 	if reorderErr != nil {
 		fmt.Fprintln(safeErr, reorderErr)
@@ -103,18 +106,43 @@ func Execute(ctx context.Context, args []string, out, errOut io.Writer) int {
 		}
 		return 1
 	}
-	timeoutSet := false
+	setFlags := make(map[string]bool)
 	options.Visit(func(f *flag.Flag) {
-		if f.Name == "timeout" {
-			timeoutSet = true
-		}
+		setFlags[f.Name] = true
 	})
-	cfg.TimeoutExplicit = timeoutSet
+	if *configPath != "" && *noConfig {
+		fmt.Fprintln(safeErr, "--config and --no-config are mutually exclusive")
+		return 1
+	}
+	var loadedConfig fileConfig
+	if *configPath != "" {
+		var cfgErr error
+		loadedConfig, cfgErr = loadConfigFile(*configPath)
+		if cfgErr != nil {
+			fmt.Fprintln(safeErr, cfgErr)
+			return 1
+		}
+		loadedConfig.apply(&cfg, format, baselinePath, showNonViable, setFlags)
+	} else if !*noConfig {
+		defaultCfgPath := filepath.Join(cfg.Dir, ".tmt.toml")
+		if _, statErr := os.Stat(defaultCfgPath); statErr == nil {
+			var cfgErr error
+			loadedConfig, cfgErr = loadConfigFile(defaultCfgPath)
+			if cfgErr != nil {
+				fmt.Fprintln(safeErr, cfgErr)
+				return 1
+			}
+			loadedConfig.apply(&cfg, format, baselinePath, showNonViable, setFlags)
+		}
+	}
+	if setFlags["timeout"] {
+		cfg.TimeoutExplicit = true
+	}
 	if *format != "text" && *format != "json" && *format != "jsonl" && *format != "sarif" {
 		fmt.Fprintf(safeErr, "invalid report format %q\n", *format)
 		return 1
 	}
-	if cfg.Jobs < 1 || (timeoutSet && cfg.Timeout <= 0) || cfg.BuildTimeout <= 0 {
+	if cfg.Jobs < 1 || (cfg.TimeoutExplicit && cfg.Timeout <= 0) || cfg.BuildTimeout <= 0 {
 		fmt.Fprintln(safeErr, "--jobs, --timeout, and --build-timeout must be positive")
 		return 1
 	}
@@ -135,6 +163,9 @@ func Execute(ctx context.Context, args []string, out, errOut io.Writer) int {
 		return 1
 	}
 	cfg.Patterns = options.Args()
+	if len(cfg.Patterns) == 0 && loadedConfig.hasPatterns {
+		cfg.Patterns = loadedConfig.Patterns
+	}
 	for _, pattern := range append(append([]string(nil), cfg.Patterns...), cfg.TestPatterns...) {
 		if strings.HasSuffix(pattern, ".go") {
 			fmt.Fprintf(safeErr, "expected a Go package pattern, got a file: %q\n", pattern)

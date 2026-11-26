@@ -81,7 +81,7 @@ func (s *session) auditProbes(ctx context.Context, report *Report, probes []prob
 		if report.Audited == s.cfg.Audit {
 			break
 		}
-		if srcJob.edit == nil || srcJob.edit.Site == nil || !srcJob.edit.Site.Arith {
+		if srcJob.edit == nil || srcJob.edit.Site == nil || !srcJob.edit.Site.IsSchemata() {
 			continue
 		}
 		if err := ctx.Err(); err != nil {

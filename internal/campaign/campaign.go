@@ -221,7 +221,7 @@ func Run(ctx context.Context, cfg Config) (Report, error) {
 	report.WorkspaceDirs = s.collectWorkspaceDirs()
 	s.replacements = s.collect(reversions)
 	for _, site := range s.sites {
-		if !site.Arith {
+		if !site.IsSchemata() {
 			report.Sites++
 		}
 	}
@@ -821,7 +821,7 @@ func (s *session) reachedConsumers() [][]*consumer {
 func (s *session) plan(report *Report, consumers [][]*consumer, allObserved *[]Finding) []probeJob {
 	var jobs []probeJob
 	for _, site := range s.sites {
-		if site.Arith {
+		if site.IsSchemata() {
 			continue
 		}
 		var seen analysis.Summary
@@ -929,7 +929,7 @@ func (s *session) replay(ctx context.Context, job probeJob) jobResult {
 	result := jobResult{finding: job.finding}
 	f := &result.finding
 	mode := selector(job.site, job.candidate)
-	if job.site.Arith {
+	if job.site.IsSchemata() {
 		mode = fmt.Sprintf("%d:%d:0:0", job.site.ID, job.arithOp)
 	}
 	f.Evidence = "replayed"
@@ -954,7 +954,7 @@ func (s *session) replay(ctx context.Context, job probeJob) jobResult {
 			f.Status, f.Detail = run.kind, run.detail
 			return result
 		}
-		if job.site.Arith {
+		if job.site.IsSchemata() {
 			if flags&8 == 0 || (run.kind == "failed" && flags&16 == 0) {
 				f.Status, f.Detail = "unstable", "replay disagreed with baseline observations"
 				return result

@@ -17,6 +17,12 @@ func Rewrite(file *File, prefix string) []byte {
 		if followsIdentifierByte(file.Data, site.Start) {
 			result.WriteByte(' ')
 		}
+		if site.Bool {
+			fmt.Fprintf(&result, "%sBool(%d, %s", prefix, site.ID, site.Expression)
+			result.WriteString(")")
+			previous = site.End
+			continue
+		}
 		if site.Arith {
 			fmt.Fprintf(&result, "%sArith(%d, %d, %s, %s", prefix, site.ID, site.ArithOp, site.Left, site.Right)
 			lines := strings.Count(site.Expression, "\n") - strings.Count(site.Left, "\n") - strings.Count(site.Right, "\n")

@@ -218,6 +218,14 @@ func (e *sourceEdits) binary(n *ast.BinaryExpr, parent ast.Node) {
 					}
 					continue
 				}
+				if site.Bool {
+					if (n.Op == token.EQL && replacement == token.NEQ) || (n.Op == token.NEQ && replacement == token.EQL) {
+						if edit := e.operator(n.OpPos, n.Op, replacement); edit != nil {
+							edit.Site, edit.ArithOp = site, 1
+						}
+					}
+					continue
+				}
 				if !site.String && (other == original.Boundary() || other == original.Negate()) {
 					continue
 				}
@@ -421,7 +429,11 @@ func (e *sourceEdits) unary(n *ast.UnaryExpr) {
 	switch n.Op {
 	case token.NOT:
 		// Keep grouping when the removed negation enclosed a comparison.
-		e.replace(n, "remove-not", e.text(n.X))
+		if edit := e.replace(n, "remove-not", e.text(n.X)); edit != nil {
+			if site := e.probed[e.positions.Offset(n.OpPos)]; site != nil && site.Bool {
+				edit.Site, edit.ArithOp = site, 1
+			}
+		}
 	case token.ADD, token.SUB:
 		replacement := token.SUB
 		if n.Op == token.SUB {
@@ -549,8 +561,10 @@ func (e *sourceEdits) condition(expr ast.Expr) {
 	e.boolean(expr, false, "condition-constant")
 	e.boolean(expr, true, "condition-constant")
 	if edit := e.replace(expr, "condition-negation", "!("+e.text(expr)+")"); edit != nil {
-		if site := e.comparison(expr); site != nil && (!site.Float || site.Op == analysis.EQ || site.Op == analysis.NE) {
+		if site := e.comparison(expr); site != nil && !site.IsSchemata() && (!site.Float || site.Op == analysis.EQ || site.Op == analysis.NE) {
 			edit.Site, edit.Operator = site, site.Op.Negate()
+		} else if site := e.boolSite(expr); site != nil {
+			edit.Site, edit.ArithOp = site, 1
 		}
 	}
 }
@@ -574,14 +588,26 @@ func (e *sourceEdits) boolean(node ast.Node, value bool, kind string) {
 		text = "(" + text + ")"
 	}
 	edit := e.replace(node, kind, text)
-	if expr, ok := node.(ast.Expr); edit != nil && ok && (kind == "condition-constant" || kind == "return-boolean") {
-		// These source edits drop both operands. A parameter or literal read cannot panic
-		// and using only those operands avoids introducing an unused local or import.
-		if site := e.comparison(expr); site != nil && site.CanDropOperands && e.separatesBoolean(edit) {
-			edit.Site = site
-			edit.Operator = analysis.AlwaysFalse
-			if value {
-				edit.Operator = analysis.AlwaysTrue
+	if expr, ok := node.(ast.Expr); edit != nil && ok {
+		if kind == "boolean-literal" {
+			if site := e.boolSite(expr); site != nil {
+				edit.Site, edit.ArithOp = site, 1
+			}
+		} else if kind == "condition-constant" || kind == "return-boolean" || kind == "error-check" {
+			// These source edits drop both operands. A parameter or literal read cannot panic
+			// and using only those operands avoids introducing an unused local or import.
+			if site := e.comparison(expr); site != nil && !site.IsSchemata() && site.CanDropOperands && e.separatesBoolean(edit) && kind != "error-check" {
+				edit.Site = site
+				edit.Operator = analysis.AlwaysFalse
+				if value {
+					edit.Operator = analysis.AlwaysTrue
+				}
+			} else if site := e.boolSite(expr); site != nil && site.CanDropOperands && e.separatesBoolean(edit) {
+				edit.Site = site
+				edit.ArithOp = 2
+				if value {
+					edit.ArithOp = 3
+				}
 			}
 		}
 	}
@@ -596,6 +622,24 @@ func (e *sourceEdits) separatesBoolean(edit *Edit) bool {
 func (e *sourceEdits) comparison(expr ast.Expr) *Site {
 	if comparison, ok := ast.Unparen(expr).(*ast.BinaryExpr); ok {
 		return e.probed[e.positions.Offset(comparison.OpPos)]
+	}
+	return nil
+}
+
+func (e *sourceEdits) boolSite(expr ast.Expr) *Site {
+	var pos token.Pos
+	switch n := ast.Unparen(expr).(type) {
+	case *ast.BinaryExpr:
+		pos = n.OpPos
+	case *ast.UnaryExpr:
+		pos = n.OpPos
+	case *ast.Ident:
+		pos = n.Pos()
+	default:
+		return nil
+	}
+	if site := e.probed[e.positions.Offset(pos)]; site != nil && site.Bool {
+		return site
 	}
 	return nil
 }

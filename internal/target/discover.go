@@ -73,8 +73,13 @@ type Site struct {
 	Reversed, String        bool
 	Float, Margin           bool
 	Arith                   bool
+	Bool                    bool
 	ArithOp                 uint64
 	CanDropOperands         bool
+}
+
+func (s *Site) IsSchemata() bool {
+	return s != nil && (s.Arith || s.Bool)
 }
 
 type Edit struct {
@@ -273,9 +278,45 @@ func findFunctionSites(file *File, fn *ast.FuncDecl, positions *token.File, pkg 
 			}
 		}()
 		if expr, ok := node.(ast.Expr); ok && pkg.TypesInfo.Types[expr].Value != nil {
+			if full {
+				if ident, ok := expr.(*ast.Ident); ok && (ident.Name == "true" || ident.Name == "false") &&
+					pkg.TypesInfo.Uses[ident] == types.Universe.Lookup(ident.Name) &&
+					types.Identical(pkg.TypesInfo.TypeOf(ident), types.Typ[types.Bool]) &&
+					safeStatement(stack, pkg.TypesInfo, safety) && !inCaseOrKey(ident, stack) {
+					pos := positions.PositionFor(ident.Pos(), false)
+					end := positions.PositionFor(ident.End()-1, false)
+					if scope.Contains(file.Path, pos.Line, end.Line) {
+						file.Sites = append(file.Sites, &Site{
+							File: file.Path, Line: pos.Line, Column: pos.Column,
+							StartLine: pos.Line, EndLine: end.Line,
+							Start: pos.Offset, End: positions.Offset(ident.End()), OperatorAt: pos.Offset,
+							Expression: text(ident), Bool: true, CanDropOperands: true,
+						})
+					}
+				}
+			}
 			return false
 		}
 		switch expr := node.(type) {
+		case *ast.UnaryExpr:
+			if full && expr.Op == token.NOT &&
+				types.Identical(pkg.TypesInfo.TypeOf(expr), types.Typ[types.Bool]) &&
+				safeStatement(stack, pkg.TypesInfo, safety) && !inCaseOrKey(expr, stack) &&
+				!hasNestedComparison(expr) {
+				pos := positions.PositionFor(expr.OpPos, false)
+				start := positions.PositionFor(expr.Pos(), false)
+				end := positions.PositionFor(expr.End()-1, false)
+				if scope.Contains(file.Path, start.Line, end.Line) {
+					file.Sites = append(file.Sites, &Site{
+						File: file.Path, Line: pos.Line, Column: pos.Column,
+						StartLine: start.Line, EndLine: end.Line,
+						Start: start.Offset, End: positions.Offset(expr.End()), OperatorAt: pos.Offset,
+						Expression: text(expr), Bool: true,
+						CanDropOperands: parameterOrLiteralOrNil(expr.X, fn, pkg.TypesInfo),
+					})
+					return false
+				}
+			}
 		case *ast.BinaryExpr:
 			pos := positions.PositionFor(expr.OpPos, false)
 			start := positions.PositionFor(expr.Pos(), false)
@@ -303,6 +344,15 @@ func findFunctionSites(file *File, fn *ast.FuncDecl, positions *token.File, pkg 
 						}
 					}
 					site.CanDropOperands = full && parameterOrLiteral(expr.X, fn, pkg.TypesInfo) && parameterOrLiteral(expr.Y, fn, pkg.TypesInfo)
+					file.Sites = append(file.Sites, site)
+					return false
+				}
+				if full && (expr.Op == token.EQL || expr.Op == token.NEQ) &&
+					types.Identical(pkg.TypesInfo.TypeOf(expr), types.Typ[types.Bool]) &&
+					!inCaseOrKey(expr, stack) && !hasNestedComparison(expr.X) && !hasNestedComparison(expr.Y) {
+					site.Op = 0
+					site.Bool = true
+					site.CanDropOperands = parameterOrLiteralOrNil(expr.X, fn, pkg.TypesInfo) && parameterOrLiteralOrNil(expr.Y, fn, pkg.TypesInfo)
 					file.Sites = append(file.Sites, site)
 					return false
 				}
@@ -402,6 +452,48 @@ func hasContextualShift(expr ast.Expr, info *types.Info) bool {
 			}
 		}
 		return true
+	})
+	return found
+}
+
+func parameterOrLiteralOrNil(expr ast.Expr, fn *ast.FuncDecl, info *types.Info) bool {
+	if ident, ok := ast.Unparen(expr).(*ast.Ident); ok && info.Uses[ident] == types.Universe.Lookup("nil") {
+		return true
+	}
+	return parameterOrLiteral(expr, fn, info)
+}
+
+func inCaseOrKey(current ast.Node, ancestors []ast.Node) bool {
+	child := current
+	for i := len(ancestors) - 1; i >= 0; i-- {
+		switch a := ancestors[i].(type) {
+		case *ast.CaseClause:
+			for _, item := range a.List {
+				if item == child {
+					return true
+				}
+			}
+			return false
+		case *ast.KeyValueExpr:
+			if a.Key == child {
+				return true
+			}
+		case ast.Stmt, *ast.FuncLit:
+			return false
+		}
+		child = ancestors[i]
+	}
+	return false
+}
+
+func hasNestedComparison(expr ast.Expr) bool {
+	found := false
+	ast.Inspect(expr, func(n ast.Node) bool {
+		if b, ok := n.(*ast.BinaryExpr); ok && operator(b.Op) != 0 {
+			found = true
+			return false
+		}
+		return !found
 	})
 	return found
 }

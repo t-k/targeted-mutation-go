@@ -174,7 +174,7 @@ func (s *session) resetReportToScope(report *Report, changed target.Scope, reach
 	report.Suppressed = 0
 	report.Findings = report.Findings[:0]
 	for _, site := range s.sites {
-		if site.Arith {
+		if site.IsSchemata() {
 			continue
 		}
 		if !changed.Contains(site.File, site.StartLine, site.EndLine) {
@@ -326,7 +326,7 @@ func (s *session) previousCandidates(allObserved []Finding, changed target.Scope
 	}
 	var result []previousCandidate
 	for _, site := range s.sites {
-		if site.String || site.Arith || changed.Contains(site.File, site.StartLine, site.EndLine) {
+		if site.String || site.IsSchemata() || changed.Contains(site.File, site.StartLine, site.EndLine) {
 			continue
 		}
 		for _, candidate := range analysis.PreviewSite(site.Op, site.Domain, site.Margin, site.Float, !s.cfg.Conventional) {

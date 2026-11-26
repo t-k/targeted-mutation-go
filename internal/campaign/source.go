@@ -30,7 +30,7 @@ type sourceResult struct {
 func (s *session) runSourceComparison(ctx context.Context, job sourceJob, reached []*consumer, baseline commandResult) sourceResult {
 	site := job.edit.Site
 	if len(reached) == 0 {
-		if site != nil && site.Arith && !s.cfg.VerifySurvivors && !s.cfg.Conventional {
+		if site != nil && site.IsSchemata() && !s.cfg.VerifySurvivors && !s.cfg.Conventional {
 			f := job.finding
 			f.Status, f.Evidence = "source-survivor", "observed"
 			return sourceResult{jobResult: jobResult{finding: f}, skipped: 1}
@@ -44,7 +44,7 @@ func (s *session) runSourceComparison(ctx context.Context, job sourceJob, reache
 	}
 	var probe probeJob
 	var result sourceResult
-	if site.Arith {
+	if site.IsSchemata() {
 		probe = probeJob{site: site, arithOp: job.edit.ArithOp, consumers: reached, finding: job.finding}
 	} else {
 		candidate := analysis.Candidate{Op: job.edit.Operator, Pivot: job.edit.Pivot, Shift: job.edit.Shift, Float: site.Float}

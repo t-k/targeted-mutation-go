@@ -31,8 +31,14 @@ func String(x string) bool { if"a" < x { return false }; return true }
 		t.Fatal(err)
 	}
 	file := pkg[0].Files[0]
-	if len(file.Sites) != 2 {
-		t.Fatalf("wanted both comparison sites, got %d", len(file.Sites))
+	var comparisons int
+	for _, s := range file.Sites {
+		if !s.IsSchemata() {
+			comparisons++
+		}
+	}
+	if comparisons != 2 {
+		t.Fatalf("wanted both comparison sites, got %d (total sites %d)", comparisons, len(file.Sites))
 	}
 	rewritten := Rewrite(file, pkg[0].Prefix)
 	if _, err := parser.ParseFile(token.NewFileSet(), file.Path, rewritten, 0); err != nil {
