@@ -25,6 +25,9 @@ type Config struct {
 	TestPatterns     []string
 	Lines            []string
 	TestRun          string
+	ExcludeRules     []string
+	List             bool
+	Shard            string
 	Tags, Since      string
 	Comparison       string
 	Jobs             int
@@ -72,6 +75,8 @@ type session struct {
 	consumers    []consumer
 	overlay      string
 	replacements []target.Replacement
+	anchors      map[string][]sourceAnchor
+	shard        shardSelection
 }
 
 func Run(ctx context.Context, cfg Config) (Report, error) {
@@ -105,6 +110,10 @@ func Run(ctx context.Context, cfg Config) (Report, error) {
 	}
 	if cfg.VerifyWitnesses && (cfg.Conventional || cfg.SourceOnly) {
 		return report, fmt.Errorf("verify-witnesses requires targeted analysis")
+	}
+	shard, err := parseShard(cfg.Shard)
+	if err != nil {
+		return report, err
 	}
 	setup, cancel := context.WithTimeout(ctx, cfg.BuildTimeout)
 	env, err := environment(setup, cfg.Dir)
@@ -140,8 +149,8 @@ func Run(ctx context.Context, cfg Config) (Report, error) {
 		return report, err
 	}
 	defer os.RemoveAll(scratch)
-	s := session{cfg: cfg, env: env, scratch: scratch, packages: packages, testPackages: packages}
-	if len(cfg.TestPatterns) != 0 {
+	s := session{cfg: cfg, env: env, scratch: scratch, packages: packages, testPackages: packages, shard: shard}
+	if len(cfg.TestPatterns) != 0 && !cfg.List {
 		setup, cancel := context.WithTimeout(ctx, cfg.BuildTimeout)
 		s.testPackages, err = resolveTestPackages(setup, cfg)
 		cancel()
@@ -154,6 +163,10 @@ func Run(ctx context.Context, cfg Config) (Report, error) {
 	if err := s.validateSnapshots(); err != nil {
 		return report, err
 	}
+	if cfg.List {
+		s.preview(&report)
+		return report, ctx.Err()
+	}
 	base := s.goTest(ctx, "", s.testPatterns()...)
 	if base.kind != "passed" {
 		return report, fmt.Errorf("ordinary Go test baseline %s:\n%s", base.kind, base.detail)
@@ -162,6 +175,7 @@ func Run(ctx context.Context, cfg Config) (Report, error) {
 		return report, err
 	}
 	if len(s.sites)+len(s.sources) == 0 {
+		report.Evaluation = "no-sites"
 		return report, nil
 	}
 	if len(s.sites) > 0 {
@@ -241,16 +255,21 @@ func (s *session) validateSnapshots() error {
 
 func (s *session) collect(reverts map[string][]target.Replacement) []target.Replacement {
 	var replacements []target.Replacement
+	s.anchors = make(map[string][]sourceAnchor)
 	for _, pkg := range s.packages {
 		hasSites := false
 		for _, file := range pkg.Files {
+			s.anchors[s.rel(file.Path)] = sourceAnchors(file.Data)
 			for i := range file.Edits {
 				edit := &file.Edits[i]
+				finding := Finding{File: s.rel(edit.File), Line: edit.Line, Column: edit.Column,
+					Expression: edit.Before, Mutation: edit.After, Rule: edit.Kind}
+				s.identify(&finding)
+				if !s.enabled(finding) {
+					continue
+				}
 				s.sources = append(s.sources, sourceJob{
-					source: file.Data,
-					edit:   edit,
-					finding: Finding{File: s.rel(edit.File), Line: edit.Line, Column: edit.Column,
-						Expression: edit.Before, Mutation: edit.After, Rule: edit.Kind},
+					source: file.Data, edit: edit, finding: finding,
 				})
 			}
 			if len(file.Sites) == 0 {
@@ -270,11 +289,12 @@ func (s *session) collect(reverts map[string][]target.Replacement) []target.Repl
 			if !slices.Contains(pkg.Paths, entry.Path) {
 				continue
 			}
-			s.sources = append(s.sources, sourceJob{
-				replacement: entry,
-				finding: Finding{File: s.rel(entry.Path), Line: entry.Line, Column: 1,
-					Rule: "revert", Mutation: "restore previous Git hunk"},
-			})
+			finding := Finding{File: s.rel(entry.Path), Line: entry.Line, Column: 1,
+				Rule: "revert", Mutation: "restore previous Git hunk"}
+			s.identify(&finding)
+			if s.enabled(finding) {
+				s.sources = append(s.sources, sourceJob{replacement: entry, finding: finding})
+			}
 		}
 	}
 	return replacements
@@ -426,11 +446,14 @@ func (s *session) plan(report *Report, consumers [][]*consumer) []probeJob {
 			continue
 		}
 		for _, candidate := range analysis.Plan(site.Op, site.Domain, seen, !s.cfg.Conventional) {
-			if s.cfg.Comparison != "" && s.cfg.Comparison != "all" && candidate.Kind != s.cfg.Comparison {
+			if !s.comparisonEnabled(candidate.Kind) {
 				continue
 			}
 			job := probeJob{site: site, candidate: candidate, predicted: !candidate.Infects(site.Op, seen)}
 			job.finding = s.describe(job, seen)
+			if !s.enabled(job.finding) {
+				continue
+			}
 			if job.predicted && !s.cfg.VerifySurvivors && !s.cfg.Conventional {
 				report.Skipped += len(reached)
 				report.add(job.finding, s.cfg.KilledFindings)
@@ -457,6 +480,7 @@ func (s *session) describe(job probeJob, seen analysis.Summary) Finding {
 	if c.Shift != 0 {
 		f.Mutation = fmt.Sprintf("%s %s %s", site.Left, c.Op, rankString(*site.Domain, c.Pivot))
 	}
+	s.identify(&f)
 	if job.predicted {
 		f.Status, f.Evidence = "input-gap", "observed"
 		if site.Domain != nil && c.Witness != nil {

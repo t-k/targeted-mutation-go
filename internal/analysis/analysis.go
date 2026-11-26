@@ -133,6 +133,15 @@ func Plan(op Operator, domain *Domain, seen Summary, targeted bool) []Candidate 
 	if seen.Flags == 0 {
 		return nil
 	}
+	return plan(op, domain, seen, targeted)
+}
+
+// Preview describes potential mutations before observing any tests.
+func Preview(op Operator, domain *Domain, targeted bool) []Candidate {
+	return plan(op, domain, Summary{}, targeted)
+}
+
+func plan(op Operator, domain *Domain, seen Summary, targeted bool) []Candidate {
 	var candidates []Candidate
 	var pivot uint64
 	if domain != nil {

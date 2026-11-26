@@ -2,6 +2,8 @@ package campaign
 
 type Report struct {
 	Schema     int       `json:"schema"`
+	Evaluation string    `json:"evaluation,omitempty"`
+	Suppressed int       `json:"suppressed,omitempty"`
 	Sites      int       `json:"sites"`
 	Builds     int       `json:"instrumented_builds"`
 	Replays    int       `json:"mutation_replays"`
@@ -15,6 +17,7 @@ type Report struct {
 }
 
 type Finding struct {
+	ID         string   `json:"id,omitempty"`
 	Status     string   `json:"status"`
 	Evidence   string   `json:"evidence,omitempty"`
 	File       string   `json:"file"`

@@ -62,6 +62,12 @@ func Execute(ctx context.Context, args []string, out, errOut io.Writer) int {
 	options.BoolVar(&cfg.ShowUnreached, "show-unreached", false, "include comparison sites the selected tests did not reach")
 	options.BoolVar(&cfg.UndoChanges, "undo-changes", false, "run tests with each edited Go hunk restored to --since")
 	options.BoolVar(&cfg.KilledFindings, "show-killed", false, "include killed mutants in the report")
+	options.BoolVar(&cfg.List, "list", false, "preview mutation candidates without running tests")
+	options.StringVar(&cfg.Shard, "shard", "", "select the zero-based shard K/N")
+	options.Func("exclude-rule", "skip a mutation rule (repeatable)", func(value string) error {
+		cfg.ExcludeRules = append(cfg.ExcludeRules, value)
+		return nil
+	})
 	format := options.String("format", "text", "report format (text or json)")
 	if err := options.Parse(args[1:]); err != nil {
 		if errors.Is(err, flag.ErrHelp) {

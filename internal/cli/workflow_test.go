@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -22,6 +24,70 @@ func writeFiles(t *testing.T, dir string, files map[string]string) {
 		}
 		if err := os.WriteFile(file, []byte(data), 0600); err != nil {
 			t.Fatal(err)
+		}
+	}
+}
+
+func TestCLIListsStableShardsWithoutRunningTests(t *testing.T) {
+	data, err := os.ReadFile("../../verification/pict/listing.tsv")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	writeFiles(t, dir, map[string]string{
+		"go.mod":         "module example.org/listing\n\ngo 1.26.0\n",
+		"broken_test.go": "package listing\nimport \"testing\"\nfunc TestBug(t *testing.T) { t.Fatal(\"must not run\") }\n",
+	})
+	const body = "func F(x int) bool { return x >= 1 }\nfunc G(x int) bool { return x >= 1 }\n"
+	collect := func(profile, shard, move string) map[string]bool {
+		t.Helper()
+		prefix := "package listing\n"
+		if move == "moved" {
+			prefix += "\n// Move declarations down.\n\n"
+		}
+		writeFiles(t, dir, map[string]string{"listing.go": prefix + body})
+		args := []string{"--list", "--exclude-rule=negation"}
+		if profile == "source" {
+			args = append(args, "--source-only")
+		}
+		switch shard {
+		case "first":
+			args = append(args, "--shard=0/2")
+		case "second":
+			args = append(args, "--shard=1/2")
+		}
+		report, status := analyzeJSON(t, dir, append(args, ".")...)
+		if status != 0 || report.Builds != 0 || report.SourceRuns != 0 || report.Replays != 0 {
+			t.Fatalf("preview ran tests: exit %d, %+v", status, report)
+		}
+		ids := make(map[string]bool)
+		for _, finding := range report.Findings {
+			if finding.Status != "candidate" || finding.ID == "" || ids[finding.ID] || finding.Rule == "negation" {
+				t.Fatalf("invalid preview finding: %+v", finding)
+			}
+			ids[finding.ID] = true
+		}
+		return ids
+	}
+	oracles := make(map[string]map[string]bool)
+	for _, profile := range []string{"targeted", "source"} {
+		whole := collect(profile, "all", "original")
+		first, second := collect(profile, "first", "original"), collect(profile, "second", "original")
+		if len(whole) == 0 || len(first)+len(second) != len(whole) {
+			t.Fatalf("shards did not partition %s", profile)
+		}
+		joined := maps.Clone(first)
+		maps.Copy(joined, second)
+		if !maps.Equal(whole, joined) {
+			t.Fatalf("shards did not cover %s", profile)
+		}
+		oracles[profile+"/all"], oracles[profile+"/first"], oracles[profile+"/second"] = whole, first, second
+	}
+	for _, row := range strings.Split(strings.TrimSpace(string(data)), "\n")[1:] {
+		fields := strings.Fields(row)
+		key := fmt.Sprintf("%s/%s", fields[0], fields[1])
+		if actual := collect(fields[0], fields[1], fields[2]); !maps.Equal(oracles[key], actual) {
+			t.Errorf("unstable IDs for %s: %v", row, actual)
 		}
 	}
 }
