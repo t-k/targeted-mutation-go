@@ -1,0 +1,53 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  go:
+    name: Go ${{ matrix.go }} on ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-15]
+        go: ['1.26.10', '1.27.4']
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v7
+        with:
+          go-version: ${{ matrix.go }}
+          cache-dependency-path: go.sum
+      - run: go test -count=1 ./...
+      - run: go vet ./...
+      - run: go test -race -count=1 ./...
+      - run: python3 scripts/check-mutants.py
+        if: matrix.os == 'ubuntu-latest' && matrix.go == '1.27.4'
+
+  formal:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+      - name: Check Lean
+        run: |
+          curl --fail --silent --show-error --location https://github.com/leanprover/elan/releases/download/v4.2.4/elan-x86_64-unknown-linux-gnu.tar.gz -o "$RUNNER_TEMP/elan.tar.gz"
+          echo "42b94d4244e8353142c456ec0e4ca6528fd898a6c604d4059f494e706e431f63  $RUNNER_TEMP/elan.tar.gz" | sha256sum --check
+          tar -xzf "$RUNNER_TEMP/elan.tar.gz" -C "$RUNNER_TEMP"
+          "$RUNNER_TEMP/elan-init" -y --no-modify-path --default-toolchain none
+          "$HOME/.elan/bin/lean" +leanprover/lean4:v4.36.0 verification/lean/Threshold.lean
+      - name: Check the campaign state machine
+        run: |
+          curl --fail --silent --show-error --location https://github.com/tlaplus/tlaplus/releases/download/v1.7.4/tla2tools.jar -o "$RUNNER_TEMP/tla2tools.jar"
+          echo "936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88  $RUNNER_TEMP/tla2tools.jar" | sha256sum --check
+          java -Xmx1g -jar "$RUNNER_TEMP/tla2tools.jar" -workers 2 -metadir "$RUNNER_TEMP/tlc" verification/tla/Campaign.tla
+      - name: Check generated PICT rows
+        run: |
+          git clone --quiet --depth 1 --branch v3.7.4 https://github.com/microsoft/pict.git "$RUNNER_TEMP/pict"
+          make -s -C "$RUNNER_TEMP/pict" -j2 pict
+          PATH="$RUNNER_TEMP/pict:$PATH" python3 scripts/check-pict.py
