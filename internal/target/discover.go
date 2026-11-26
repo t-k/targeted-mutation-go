@@ -199,7 +199,7 @@ func findFunctionSites(file *File, fn *ast.FuncDecl, positions *token.File, pkg 
 				}
 			}
 			if full {
-				appendEdits(file, positions, expr.OpPos, expr.Op)
+				appendEdits(file, positions, expr, pkg.TypesInfo)
 			}
 		}
 		return true
@@ -406,7 +406,8 @@ func operator(op token.Token) analysis.Operator {
 	return 0
 }
 
-func appendEdits(file *File, positions *token.File, at token.Pos, op token.Token) {
+func appendEdits(file *File, positions *token.File, expr *ast.BinaryExpr, info *types.Info) {
+	op := expr.Op
 	var replacements []token.Token
 	if cmp := operator(op); cmp != 0 {
 		for _, opt := range []analysis.Operator{cmp.Boundary(), cmp.Negate()} {
@@ -430,8 +431,18 @@ func appendEdits(file *File, positions *token.File, at token.Pos, op token.Token
 			replacements = []token.Token{token.MUL}
 		}
 	}
-	pos := positions.PositionFor(at, false)
+	pos := positions.PositionFor(expr.OpPos, false)
 	for _, replacement := range replacements {
+		if replacement == token.ADD || replacement == token.SUB || replacement == token.MUL || replacement == token.QUO {
+			typ, ok := info.TypeOf(expr).Underlying().(*types.Basic)
+			if !ok || typ.Info()&types.IsNumeric == 0 {
+				continue
+			}
+			if value := info.Types[expr.Y].Value; replacement == token.QUO && value != nil &&
+				constant.Compare(value, token.EQL, constant.MakeInt64(0)) {
+				continue
+			}
+		}
 		file.Edits = append(file.Edits, Edit{
 			File: file.Path, Line: pos.Line, Column: pos.Column, Start: pos.Offset, End: pos.Offset + len(op.String()),
 			Before: op.String(), After: replacement.String(), Kind: "source-operator",

@@ -69,3 +69,21 @@ func write(t *testing.T, dir, name, contents string) {
 		t.Fatal(err)
 	}
 }
+
+func TestFullOnlyCreatesViableArithmeticKinds(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "go.mod", "module example.org/full\n\ngo 1.26.0\n")
+	write(t, dir, "full.go", `package full
+func add(n int) int { return n + 1 }
+func concat(s string) string { return s + "/" }
+func zero(n int) int { return n * 0 }
+`)
+	pkgs, err := Discover(context.Background(), dir, []string{"."}, "", nil, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	edits := pkgs[0].Files[0].Edits
+	if len(edits) != 1 || edits[0].Line != 2 || edits[0].After != "-" {
+		t.Fatalf("unbuildable arithmetic candidates: %+v", edits)
+	}
+}
