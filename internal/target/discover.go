@@ -65,6 +65,7 @@ type Edit struct {
 	Line, Column        int
 	Start, End          int
 	Before, After, Kind string
+	MissingReturn       bool
 }
 
 type Discovery struct {

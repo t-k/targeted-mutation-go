@@ -30,6 +30,10 @@ func (job sourceJob) materialize() target.Replacement {
 
 func (s *session) runSource(ctx context.Context, job sourceJob, baseline commandResult) jobResult {
 	result := jobResult{finding: job.finding}
+	if !s.cfg.SourceOnly && job.edit != nil && job.edit.MissingReturn {
+		result.finding.Status, result.finding.Evidence, result.finding.Detail = "non-viable", "static", "missing return"
+		return result
+	}
 	dir, err := os.MkdirTemp(s.scratch, "source-")
 	if err != nil {
 		result.err = err

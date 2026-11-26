@@ -1,0 +1,13 @@
+Block	Results	Mode
+function	none	full
+function	unnamed	full
+function	named	source-only
+closure	named	full
+inner	unnamed	full
+method	none	source-only
+closure	unnamed	source-only
+method	unnamed	full
+inner	none	source-only
+method	named	source-only
+inner	named	source-only
+closure	none	source-only

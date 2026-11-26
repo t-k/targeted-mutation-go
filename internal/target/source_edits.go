@@ -100,7 +100,9 @@ func (e *sourceEdits) visit(node ast.Node, ancestors []ast.Node) bool {
 		}
 	case *ast.BlockStmt:
 		if len(n.List) > 0 {
-			e.add(n.Lbrace+1, n.Rbrace, n.Lbrace, "empty-block", "")
+			if edit := e.add(n.Lbrace+1, n.Rbrace, n.Lbrace, "empty-block", ""); edit != nil {
+				edit.MissingReturn = requiresTerminator(n, parent)
+			}
 		}
 	case *ast.CaseClause:
 		e.caseBody(n.Colon, n.Body)
@@ -125,20 +127,32 @@ func (e *sourceEdits) text(node ast.Node) string {
 	return string(e.file.Data[e.positions.Offset(node.Pos()):e.positions.Offset(node.End())])
 }
 
-func (e *sourceEdits) add(start, end, anchor token.Pos, kind, replacement string) {
+func requiresTerminator(block *ast.BlockStmt, parent ast.Node) bool {
+	// A function with results must end in a terminating statement.
+	switch fn := parent.(type) {
+	case *ast.FuncDecl:
+		return fn.Body == block && fn.Type.Results.NumFields() > 0
+	case *ast.FuncLit:
+		return fn.Body == block && fn.Type.Results.NumFields() > 0
+	}
+	return false
+}
+
+func (e *sourceEdits) add(start, end, anchor token.Pos, kind, replacement string) *Edit {
 	if !e.inScope(start, end) {
-		return
+		return nil
 	}
 	from, to := e.positions.Offset(start), e.positions.Offset(end)
 	original := string(e.file.Data[from:to])
 	key := editKey{from, to, replacement}
 	if original == replacement || e.added[key] {
-		return
+		return nil
 	}
 	e.added[key] = true
 	pos := e.positions.PositionFor(anchor, false)
 	e.file.Edits = append(e.file.Edits, Edit{File: e.file.Path, Line: pos.Line, Column: pos.Column,
 		Start: from, End: to, Before: original, After: replacement, Kind: kind})
+	return &e.file.Edits[len(e.file.Edits)-1]
 }
 
 func (e *sourceEdits) replace(node ast.Node, kind, replacement string) {
