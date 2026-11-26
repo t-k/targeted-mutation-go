@@ -1,0 +1,6 @@
+Operator: ge, gt, le, lt
+Domain: signed, unsigned, full
+Boundary: low, middle, high
+Observations: both, equal, below, above, empty
+IF [Boundary] = "low" THEN [Observations] <> "below" AND [Observations] <> "both";
+IF [Boundary] = "high" THEN [Observations] <> "above" AND [Observations] <> "both";

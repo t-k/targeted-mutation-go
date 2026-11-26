@@ -1,0 +1,6 @@
+Operator	Domain	Boundary	Observations
+ge	signed	middle	both
+ge	unsigned	low	equal
+le	full	high	below
+gt	full	high	equal
+lt	unsigned	low	above
