@@ -131,6 +131,9 @@ func Run(ctx context.Context, cfg Config) (Report, error) {
 	if base.kind != "passed" {
 		return report, fmt.Errorf("ordinary Go test baseline %s:\n%s", base.kind, base.detail)
 	}
+	if err := s.validateSnapshots(); err != nil {
+		return report, err
+	}
 	if len(s.sites)+len(s.sources) == 0 {
 		return report, nil
 	}

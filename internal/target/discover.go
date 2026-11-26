@@ -181,12 +181,13 @@ func findFunctionSites(file *File, fn *ast.FuncDecl, positions *token.File, pkg 
 		switch expr := node.(type) {
 		case *ast.BinaryExpr:
 			pos := positions.PositionFor(expr.OpPos, false)
-			if !scope.Contains(file.Path, pos.Line, pos.Line) {
+			start := positions.PositionFor(expr.Pos(), false)
+			end := positions.PositionFor(expr.End()-1, false)
+			if !scope.Contains(file.Path, start.Line, end.Line) {
 				return true
 			}
 			op := operator(expr.Op)
 			if probes && op != 0 && safeStatement(stack, pkg.TypesInfo, safety) && validOperand(expr.X) && validOperand(expr.Y) && pkg.TypesInfo.Types[expr].Value == nil {
-				start := positions.PositionFor(expr.Pos(), false)
 				site := &Site{
 					File: file.Path, Line: pos.Line, Column: pos.Column,
 					Start: start.Offset, End: positions.Offset(expr.End()), Op: op,
@@ -198,7 +199,7 @@ func findFunctionSites(file *File, fn *ast.FuncDecl, positions *token.File, pkg 
 				}
 			}
 			if full {
-				appendEdits(file, positions, expr.OpPos, expr.Op, pkg.TypesInfo.Types[expr].Value == nil)
+				appendEdits(file, positions, expr.OpPos, expr.Op)
 			}
 		}
 		return true
@@ -405,10 +406,7 @@ func operator(op token.Token) analysis.Operator {
 	return 0
 }
 
-func appendEdits(file *File, positions *token.File, at token.Pos, op token.Token, nonconstant bool) {
-	if !nonconstant {
-		return
-	}
+func appendEdits(file *File, positions *token.File, at token.Pos, op token.Token) {
 	var replacements []token.Token
 	if cmp := operator(op); cmp != 0 {
 		for _, opt := range []analysis.Operator{cmp.Boundary(), cmp.Negate()} {

@@ -171,7 +171,8 @@ func TestCampaignScopesAndRevertsGitHunks(t *testing.T) {
 	ctx := context.Background()
 	fixture(t, dir, "go.mod", "module example.org/git\n\ngo 1.26.0\n")
 	original := `package changes
-func Scope(n int) bool { return n >= 2 }
+func Scope(n int) bool { return n >=
+	2 }
 func Unchanged(n int) bool { return n >= 4 }
 `
 	fixture(t, dir, "changes.go", original)
@@ -189,7 +190,7 @@ func TestScope(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	changed := strings.Replace(original, ">= 2", ">= 3", 1)
+	changed := strings.Replace(original, "\t2 }", "\t3 }", 1)
 	fixture(t, dir, "changes.go", changed)
 	fixture(t, dir, "added.go", "package changes\nfunc Added(n int) bool { return n >= 5 }\n")
 	report, err := Run(ctx, Config{Dir: dir, Since: "HEAD", UndoChanges: true, ShowUnreached: true})
@@ -200,7 +201,7 @@ func TestScope(t *testing.T) {
 		t.Fatalf("incorrect diff scope: %+v", report)
 	}
 	for _, finding := range report.Findings {
-		if finding.Status == "untested-change" && finding.File == "changes.go" && finding.Line == 2 {
+		if finding.Status == "untested-change" && finding.File == "changes.go" && finding.Line == 3 {
 			return
 		}
 	}
@@ -234,14 +235,16 @@ func TestProfileFlagsAndEmptyScopeBaseline(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "intentionally failing") {
 		t.Errorf("empty scope did not validate its baseline: %v", err)
 	}
-	fixture(t, dir, "coverage.out", "original data")
-	t.Setenv("GOFLAGS", "-coverprofile=coverage.out")
-	_, err = Run(context.Background(), Config{Dir: dir})
-	if err == nil || !strings.Contains(err.Error(), "coverprofile") {
-		t.Errorf("profiling flags should be rejected: %v", err)
-	}
-	data, err := os.ReadFile(filepath.Join(dir, "coverage.out"))
-	if err != nil || string(data) != "original data" {
-		t.Fatalf("profile output changed: %q, %v", data, err)
+	for _, option := range []string{"-coverprofile=coverage.out", "-debug-runtime-trace=coverage.out", "-cpu=1"} {
+		fixture(t, dir, "coverage.out", "original data")
+		t.Setenv("GOFLAGS", option)
+		_, err = Run(context.Background(), Config{Dir: dir})
+		if err == nil || !strings.Contains(err.Error(), "GOFLAGS") {
+			t.Errorf("%s should be rejected: %v", option, err)
+		}
+		data, err := os.ReadFile(filepath.Join(dir, "coverage.out"))
+		if err != nil || string(data) != "original data" {
+			t.Errorf("%s overwrote the fixture: %d bytes, %v", option, len(data), err)
+		}
 	}
 }

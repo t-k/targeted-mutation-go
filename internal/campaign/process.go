@@ -48,22 +48,40 @@ func environment(ctx context.Context, dir string) (goEnvironment, error) {
 	if env.GOOS != "linux" && env.GOOS != "darwin" {
 		return env, fmt.Errorf("native probe execution requires Linux or macOS")
 	}
-	for _, flag := range strings.Fields(env.GOFLAGS) {
-		key, value, _ := strings.Cut(strings.Trim(flag, "'\""), "=")
-		normalized := strings.TrimPrefix(strings.TrimLeft(key, "-"), "test.")
-		switch normalized {
-		case "overlay", "exec", "run", "skip", "bench", "count", "short", "parallel", "shuffle",
-			"failfast", "v", "fuzz", "fuzzcachedir", "list", "vet", "o", "c", "json", "n",
-			"outputdir", "cover", "coverprofile", "cpuprofile", "memprofile", "blockprofile",
-			"mutexprofile", "trace", "testlogfile", "modfile":
-			return env, fmt.Errorf("GOFLAGS option %s conflicts with campaign execution", key)
-		case "mod":
-			if value != "readonly" && value != "vendor" {
-				return env, fmt.Errorf("GOFLAGS option %s can modify module files", flag)
-			}
-		}
+	if err := checkGoFlags(env.GOFLAGS); err != nil {
+		return env, err
 	}
 	return env, nil
+}
+
+func checkGoFlags(raw string) error {
+	for raw = strings.TrimSpace(raw); raw != ""; raw = strings.TrimSpace(raw) {
+		var flag string
+		if quote := raw[0]; quote == '\'' || quote == '"' {
+			var found bool
+			flag, raw, found = strings.Cut(raw[1:], string(quote))
+			if !found {
+				return fmt.Errorf("GOFLAGS contains an unterminated quote")
+			}
+		} else {
+			end := strings.IndexAny(raw, " \t\r\n")
+			if end < 0 {
+				end = len(raw)
+			}
+			flag, raw = raw[:end], raw[end:]
+		}
+		name, value, _ := strings.Cut(flag, "=")
+		switch strings.TrimLeft(name, "-") {
+		case "a", "asan", "buildvcs", "msan", "p", "race", "tags", "trimpath":
+			continue
+		case "mod":
+			if value == "readonly" || value == "vendor" {
+				continue
+			}
+		}
+		return fmt.Errorf("GOFLAGS option %q is not supported in a mutation campaign", name)
+	}
+	return nil
 }
 
 func cleanEnv(overrides ...string) []string {
