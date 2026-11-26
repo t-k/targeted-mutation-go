@@ -261,6 +261,42 @@ func TestLimit(t *testing.T) {
 	}
 }
 
+func TestCheckpointIncludesWorkspaceModulesOutsideGoWorkDirectory(t *testing.T) {
+	dir := t.TempDir()
+	writeFiles(t, dir, map[string]string{
+		"workspace/go.work":       "go 1.26.0\nuse (\n ../producer\n ../consumer\n)\n",
+		"producer/go.mod":         "module example.org/producer\n\ngo 1.26.0\n",
+		"producer/value.go":       "package producer\nfunc Ready(x int) bool { return x >= 1 }\n",
+		"consumer/go.mod":         "module example.org/consumer\n\ngo 1.26.0\n",
+		"consumer/testdata/check": "yes",
+		"consumer/check_test.go": `package consumer
+import ("os"; "testing"; "example.org/producer")
+func TestLimit(t *testing.T) {
+	got := producer.Ready(1)
+	data, err := os.ReadFile("testdata/check")
+	if err != nil { t.Fatal(err) }
+	if string(data) == "yes" && !got { t.Fatal("limit") }
+}
+`,
+	})
+	workspace := filepath.Join(dir, "workspace")
+	args := []string{"--checkpoint=" + filepath.Join(dir, "work.jsonl"), "--comparison=boundary", "--test-package=example.org/consumer", "example.org/producer"}
+	first, code := analyzeJSON(t, workspace, args...)
+	if code != 0 || first.Killed != 1 {
+		t.Fatalf("initial workspace campaign exit %d, report %+v", code, first)
+	}
+	second, code := analyzeJSON(t, workspace, args...)
+	if code != 0 || second.Resumed != 1 {
+		t.Fatalf("unchanged workspace did not resume: exit %d, %+v", code, second)
+	}
+	writeFiles(t, dir, map[string]string{"consumer/testdata/check": "no"})
+	var stdout, stderr bytes.Buffer
+	code = Execute(context.Background(), append([]string{"analyze", "--dir", workspace}, args...), &stdout, &stderr)
+	if code != 1 || !strings.Contains(stderr.String(), "fingerprint") {
+		t.Fatalf("changed workspace fixture reused the campaign: exit %d, %s %s", code, &stdout, &stderr)
+	}
+}
+
 func TestCLIVerifiesConcreteSourceWitness(t *testing.T) {
 	dir := t.TempDir()
 	writeFiles(t, dir, map[string]string{

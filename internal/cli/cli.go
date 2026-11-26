@@ -45,7 +45,7 @@ func Execute(ctx context.Context, args []string, out, errOut io.Writer) int {
 		cfg.Lines = append(cfg.Lines, value)
 		return nil
 	})
-	options.Func("test-package", "run tests from this package pattern instead of the mutation patterns (repeatable)", func(value string) error {
+	options.Func("test-package", "select independent test package patterns (repeatable)", func(value string) error {
 		cfg.TestPatterns = append(cfg.TestPatterns, value)
 		return nil
 	})
@@ -99,7 +99,7 @@ func Execute(ctx context.Context, args []string, out, errOut io.Writer) int {
 		return 1
 	}
 	if cfg.List && (*baselinePath != "" || *writeBaselinePath != "") {
-		fmt.Fprintln(errOut, "baselines apply to evaluated findings, not --list")
+		fmt.Fprintln(errOut, "--baseline and --write-baseline require an evaluated campaign")
 		return 1
 	}
 	cfg.Patterns = options.Args()

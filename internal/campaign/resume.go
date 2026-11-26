@@ -74,7 +74,25 @@ func (s *session) campaignFingerprint(ctx context.Context, journalPath string) (
 	} else if filepath.IsAbs(s.env.GOMOD) && s.env.GOMOD != os.DevNull {
 		workspace = filepath.Dir(s.env.GOMOD)
 	}
-	if err := filepath.WalkDir(workspace, func(path string, entry fs.DirEntry, err error) error {
+	rootSeen := make(map[string]bool)
+	addTree := func(root string) error {
+		if rootSeen[root] {
+			return nil
+		}
+		rootSeen[root] = true
+		return hashTree(root, addFile)
+	}
+	if err := addTree(workspace); err != nil {
+		return "", err
+	}
+	if err := s.fingerprintDependencies(ctx, addFile, addTree); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(state.Sum(nil)), nil
+}
+
+func hashTree(root string, addFile func(string) error) error {
+	return filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
@@ -88,16 +106,10 @@ func (s *session) campaignFingerprint(ctx context.Context, journalPath string) (
 			return nil
 		}
 		return addFile(path)
-	}); err != nil {
-		return "", err
-	}
-	if err := s.fingerprintDependencies(ctx, addFile); err != nil {
-		return "", err
-	}
-	return hex.EncodeToString(state.Sum(nil)), nil
+	})
 }
 
-func (s *session) fingerprintDependencies(ctx context.Context, addFile func(string) error) error {
+func (s *session) fingerprintDependencies(ctx context.Context, addFile, addTree func(string) error) error {
 	args := append([]string{"list", "-deps", "-test", "-json"}, s.buildFlags()...)
 	args = append(args, append(slices.Clone(s.cfg.Patterns), s.testPatterns()...)...)
 	cmd := exec.CommandContext(ctx, "go", args...)
@@ -108,14 +120,18 @@ func (s *session) fingerprintDependencies(ctx context.Context, addFile func(stri
 		return fmt.Errorf("go list dependency files: %w", err)
 	}
 	decoder := json.NewDecoder(bytes.NewReader(out))
-	var files []string
+	var files, localRoots []string
 	for {
 		var pkg struct {
 			Dir                                                                  string
 			GoFiles, CgoFiles, TestGoFiles, XTestGoFiles                         []string
 			CFiles, CXXFiles, MFiles, HFiles, FFiles, SFiles, SwigFiles          []string
 			SwigCXXFiles, SysoFiles, EmbedFiles, TestEmbedFiles, XTestEmbedFiles []string
-			Module                                                               *struct{ GoMod string }
+			Module                                                               *struct {
+				GoMod, Dir string
+				Main       bool
+				Replace    *struct{ Dir, Version string }
+			}
 		}
 		if err := decoder.Decode(&pkg); err != nil {
 			if err != io.EOF {
@@ -123,8 +139,15 @@ func (s *session) fingerprintDependencies(ctx context.Context, addFile func(stri
 			}
 			break
 		}
-		if pkg.Module != nil && pkg.Module.GoMod != "" {
-			files = append(files, pkg.Module.GoMod)
+		if module := pkg.Module; module != nil {
+			if module.GoMod != "" {
+				files = append(files, module.GoMod)
+			}
+			if module.Main && module.Dir != "" {
+				localRoots = append(localRoots, module.Dir)
+			} else if module.Replace != nil && module.Replace.Dir != "" && module.Replace.Version == "" {
+				localRoots = append(localRoots, module.Replace.Dir)
+			}
 		}
 		for _, file := range slices.Concat(pkg.GoFiles, pkg.CgoFiles, pkg.TestGoFiles, pkg.XTestGoFiles,
 			pkg.CFiles, pkg.CXXFiles, pkg.MFiles, pkg.HFiles, pkg.FFiles, pkg.SFiles, pkg.SwigFiles,
@@ -133,6 +156,12 @@ func (s *session) fingerprintDependencies(ctx context.Context, addFile func(stri
 				file = filepath.Join(pkg.Dir, file)
 			}
 			files = append(files, filepath.Clean(file))
+		}
+	}
+	slices.Sort(localRoots)
+	for _, root := range slices.Compact(localRoots) {
+		if err := addTree(root); err != nil {
+			return err
 		}
 	}
 	slices.Sort(files)

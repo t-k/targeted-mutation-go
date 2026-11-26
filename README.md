@@ -84,7 +84,7 @@ targeted-mutation-go analyze --full --checkpoint .tmt-campaign.jsonl --audit 5 .
 - `--list` previews candidates without running tests. Threshold previews include observation-dependent candidates that the actual run may prune. `--exclude-rule` removes a rule from the campaign. `--shard K/N` deterministically assigns candidate IDs to zero-based shards. Each shard still checks its own baseline.
 - `--format jsonl` emits a summary and one record per finding. `--format sarif` emits SARIF 2.1.0 with stable partial fingerprints. `--write-baseline FILE` records the current gaps, and `--baseline FILE` suppresses those IDs from subsequent output and exit status. IDs include the source file, function, code anchor, and edit. This keeps them stable when the function moves within the file or surrounding lines are inserted.
 - `--checkpoint FILE` resumes completed results with the same campaign fingerprint. The fingerprint includes the executable, configuration, environment, local module files and fixtures, and Go dependency files. The ordinary baseline and comparison observations are refreshed. Keep the journal when restarting the same campaign, and use a different journal for different inputs or runner environments.
-- `--audit N` rebuilds up to `N` completed probe mutations as source edits. A disagreement or an unconfirmed source verdict makes the campaign incomplete.
+- `--audit N` rebuilds up to `N` completed boundary, negation, or synthesized threshold mutations from the comparison plan as source edits. A disagreement or an unconfirmed source verdict makes the campaign incomplete.
 
 ## How it works
 
