@@ -202,3 +202,127 @@ func TestFree(t *testing.T) {
 		t.Fatalf("baseline without --out expected exit 1, got %d", badCode)
 	}
 }
+
+func TestCLIMethodAssertionDiagnostics(t *testing.T) {
+	dir := t.TempDir()
+	files := map[string]string{
+		"go.mod": "module example.org/method\n\ngo 1.26.0\n",
+		"policy.go": `package method
+
+type Policy struct {
+	Budget int
+}
+
+func (p Policy) Affords(charge int) bool {
+	return charge <= p.Budget
+}
+`,
+		"policy_test.go": `package method
+import "testing"
+func TestPolicyBudget(t *testing.T) {
+	p := Policy{Budget: 30}
+	_ = p.Affords(30)
+}
+`,
+	}
+	for path, data := range files {
+		if err := os.WriteFile(filepath.Join(dir, path), []byte(data), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var stdout, stderr bytes.Buffer
+	code := Execute(context.Background(), []string{"analyze", "--dir", dir, "--jobs=1", "--suggest-assertions", "--comparison=boundary", "."}, &stdout, &stderr)
+	if code != 2 {
+		t.Fatalf("expected exit 2, got %d: stdout=%s stderr=%s", code, &stdout, &stderr)
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "ASSERTION GAP") ||
+		!strings.Contains(out, "tests that observed the change: TestPolicyBudget") ||
+		!strings.Contains(out, "distinguishing condition: charge == p.Budget (original: true, mutant: false)") ||
+		!strings.Contains(out, "assertion code not synthesized:") {
+		t.Fatalf("expected method assertion diagnostic details, got:\n%s", out)
+	}
+}
+
+func TestCLIExternalTestWitnessAndSharedCheckGrouping(t *testing.T) {
+	dir := t.TempDir()
+	files := map[string]string{
+		"go.mod": "module example.org/extwitness\n\ngo 1.26.0\n",
+		"internal/ingest/policy.go": `package ingest
+
+func WithinBatchLimit(records int) bool {
+	return records <= 100
+}
+
+func PerBatchCharge(records, percent int) int {
+	return (records * percent) / 100
+}
+`,
+		"integration/policy_test.go": `package integration
+
+import (
+	"testing"
+
+	"example.org/extwitness/internal/ingest"
+)
+
+func TestBatch(t *testing.T) {
+	if !ingest.WithinBatchLimit(100) || ingest.WithinBatchLimit(120) {
+		t.Fatal("limit mismatch")
+	}
+	if got := ingest.PerBatchCharge(200, 15); got != 30 {
+		t.Fatalf("got %d, want 30", got)
+	}
+}
+`,
+	}
+	for rel, data := range files {
+		full := filepath.Join(dir, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(full), 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(full, []byte(data), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var stdout, stderr bytes.Buffer
+	code := Execute(context.Background(), []string{"analyze", "--dir", dir, "--jobs=1", "--full", "--verify-witnesses", "./..."}, &stdout, &stderr)
+	if code != 2 {
+		t.Fatalf("expected exit 2, got %d: stdout=%s stderr=%s", code, &stdout, &stderr)
+	}
+	textOut := stdout.String()
+	if !strings.Contains(textOut, "ingest.WithinBatchLimit(101)") {
+		t.Fatalf("expected qualified external call ingest.WithinBatchLimit(101), got:\n%s", textOut)
+	}
+	if !strings.Contains(textOut, "shared check catches 2 mutations:") {
+		t.Fatalf("expected grouped shared check in text output, got:\n%s", textOut)
+	}
+	if !strings.Contains(textOut, "suggested file: integration/policy_witness_test.go") ||
+		!strings.Contains(textOut, "package integration") {
+		t.Fatalf("expected external package source witness with suggested file, got:\n%s", textOut)
+	}
+
+	// JSON output must still contain all individual findings with distinct IDs.
+	stdout.Reset()
+	stderr.Reset()
+	code = Execute(context.Background(), []string{"analyze", "--dir", dir, "--jobs=1", "--full", "--verify-witnesses", "--format=json", "./..."}, &stdout, &stderr)
+	if code != 2 {
+		t.Fatalf("json run expected exit 2, got %d: stderr=%s", code, &stderr)
+	}
+	var report campaign.Report
+	if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
+		t.Fatal(err)
+	}
+	matching := 0
+	for _, f := range report.Findings {
+		if f.Witness != nil && f.Witness.Call == "ingest.WithinBatchLimit(101)" {
+			matching++
+		}
+		if f.SourceWitness != nil && f.SourceWitness.Call == "ingest.WithinBatchLimit(101)" {
+			matching++
+		}
+	}
+	if matching < 2 {
+		t.Fatalf("expected JSON to preserve both findings for ingest.WithinBatchLimit(101), got %d in %+v", matching, report.Findings)
+	}
+}

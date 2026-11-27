@@ -82,6 +82,7 @@ func Execute(ctx context.Context, args []string, out, errOut io.Writer) int {
 	options.BoolVar(&cfg.UndoChanges, "undo-changes", false, "run tests with each edited Go hunk restored to --since")
 	options.BoolVar(&cfg.KilledFindings, "show-killed", false, "include killed mutants in the report")
 	options.BoolVar(&cfg.RequireTests, "require-tests", false, "fail with exit code 1 if target sites exist but 0 tests run")
+	options.StringVar(&cfg.WitnessPackage, "witness-package", "", "target test package for formatted witness code")
 	showNonViable := options.Bool("show-non-viable", false, "include non-viable candidates in text output")
 	options.BoolVar(&cfg.List, "list", false, "preview mutation candidates without running tests")
 	options.StringVar(&cfg.Shard, "shard", "", "select the zero-based shard K/N")
@@ -304,66 +305,135 @@ func version() string {
 	return "targeted-mutation-go (development build)"
 }
 
-func writeText(out io.Writer, report campaign.Report, showNonViable bool) error {
-	var text strings.Builder
-	for _, finding := range report.Findings {
-		if finding.Status == "non-viable" && !showNonViable {
-			continue
+func verifiedCheckKey(f campaign.Finding) (string, bool) {
+	if f.Witness != nil && f.Witness.Verified && f.Witness.Call != "" {
+		return fmt.Sprintf("%s\x00%s\x00%t", f.File, f.Witness.Call, f.Witness.Original), true
+	}
+	if f.SourceWitness != nil && f.SourceWitness.Verified && f.SourceWitness.Call != "" {
+		return fmt.Sprintf("%s\x00%s\x00%s", f.File, f.SourceWitness.Call, f.SourceWitness.Original), true
+	}
+	return "", false
+}
+
+func writeFindingBody(text *strings.Builder, finding campaign.Finding, prefix string, includeWitness bool) {
+	label := strings.ToUpper(strings.ReplaceAll(SanitizeInline(finding.Status), "-", " "))
+	fmt.Fprintf(text, "%s%s %s:%d:%d\n", prefix, label, SanitizeInline(finding.File), finding.Line, finding.Column)
+	if finding.Expression != "" {
+		fmt.Fprintf(text, "  expression: %s\n", SanitizeInline(finding.Expression))
+	}
+	if finding.Mutation != "" {
+		if finding.Evidence != "" {
+			fmt.Fprintf(text, "  mutation: %s [%s]\n", SanitizeInline(finding.Mutation), SanitizeInline(finding.Evidence))
+		} else {
+			fmt.Fprintf(text, "  mutation: %s\n", SanitizeInline(finding.Mutation))
 		}
-		label := strings.ToUpper(strings.ReplaceAll(SanitizeInline(finding.Status), "-", " "))
-		fmt.Fprintf(&text, "%s %s:%d:%d\n", label, SanitizeInline(finding.File), finding.Line, finding.Column)
-		if finding.Expression != "" {
-			fmt.Fprintf(&text, "  expression: %s\n", SanitizeInline(finding.Expression))
-		}
-		if finding.Mutation != "" {
-			if finding.Evidence != "" {
-				fmt.Fprintf(&text, "  mutation: %s [%s]\n", SanitizeInline(finding.Mutation), SanitizeInline(finding.Evidence))
-			} else {
-				fmt.Fprintf(&text, "  mutation: %s\n", SanitizeInline(finding.Mutation))
-			}
-		}
-		if len(finding.Interval) == 2 {
-			fmt.Fprintf(&text, "  observed-equivalent thresholds: %s..%s\n", SanitizeInline(finding.Interval[0]), SanitizeInline(finding.Interval[1]))
-		}
+	}
+	if len(finding.Interval) == 2 {
+		fmt.Fprintf(text, "  observed-equivalent thresholds: %s..%s\n", SanitizeInline(finding.Interval[0]), SanitizeInline(finding.Interval[1]))
+	}
+	if includeWitness {
 		if witness := finding.Witness; witness != nil {
 			if witness.Call != "" {
-				fmt.Fprintf(&text, "  add a check for %s == %t (mutant: %t)", SanitizeInline(witness.Call), witness.Original, witness.Mutant)
+				fmt.Fprintf(text, "  add a check for %s == %t (mutant: %t)", SanitizeInline(witness.Call), witness.Original, witness.Mutant)
 			} else {
-				fmt.Fprintf(&text, "  distinguishing operand: %s = %s (original: %t, mutant: %t)", SanitizeInline(witness.Operand), SanitizeInline(witness.Input), witness.Original, witness.Mutant)
+				fmt.Fprintf(text, "  distinguishing operand: %s = %s (original: %t, mutant: %t)", SanitizeInline(witness.Operand), SanitizeInline(witness.Input), witness.Original, witness.Mutant)
 			}
 			if witness.Verified {
 				text.WriteString(" [verified]")
 			}
 			text.WriteByte('\n')
-			writeSuggestion(&text, witness.Code)
+			writeSuggestion(text, witness.Code)
 		}
 		if witness := finding.SourceWitness; witness != nil {
-			fmt.Fprintf(&text, "  verified with %s (original %s, mutant %s)\n",
+			fmt.Fprintf(text, "  verified with %s (original %s, mutant %s)\n",
 				SanitizeInline(witness.Call), SanitizeInline(witness.Original), SanitizeInline(witness.Mutated))
-			writeSuggestion(&text, witness.Code)
+			if witness.SuggestedFile != "" {
+				fmt.Fprintf(text, "  suggested file: %s\n", SanitizeInline(witness.SuggestedFile))
+			}
+			writeSuggestion(text, witness.Code)
 		}
-		if len(finding.Packages) != 0 {
-			pkgs := make([]string, len(finding.Packages))
-			for i, p := range finding.Packages {
-				pkgs[i] = SanitizeInline(p)
-			}
-			fmt.Fprintf(&text, "  test packages: %s\n", strings.Join(pkgs, ", "))
+	}
+	if len(finding.Packages) != 0 {
+		pkgs := make([]string, len(finding.Packages))
+		for i, p := range finding.Packages {
+			pkgs[i] = SanitizeInline(p)
 		}
-		if len(finding.Tests) != 0 {
-			label := "failing tests"
-			if finding.Status == "assertion-gap" {
-				label = "tests that observed the change"
-			}
-			tests := make([]string, len(finding.Tests))
-			for i, name := range finding.Tests {
-				tests[i] = SanitizeInline(name)
-			}
-			fmt.Fprintf(&text, "  %s: %s\n", label, strings.Join(tests, ", "))
+		fmt.Fprintf(text, "  test packages: %s\n", strings.Join(pkgs, ", "))
+	}
+	if len(finding.Tests) != 0 {
+		label := "failing tests"
+		if finding.Status == "assertion-gap" {
+			label = "tests that observed the change"
 		}
-		if finding.Detail != "" {
-			for line := range strings.SplitSeq(SanitizeBlock(finding.Detail), "\n") {
-				fmt.Fprintf(&text, "  %s\n", line)
+		tests := make([]string, len(finding.Tests))
+		for i, name := range finding.Tests {
+			tests[i] = SanitizeInline(name)
+		}
+		fmt.Fprintf(text, "  %s: %s\n", label, strings.Join(tests, ", "))
+	}
+	if finding.Detail != "" {
+		for line := range strings.SplitSeq(SanitizeBlock(finding.Detail), "\n") {
+			fmt.Fprintf(text, "  %s\n", line)
+		}
+	}
+}
+
+func writeText(out io.Writer, report campaign.Report, showNonViable bool) error {
+	var text strings.Builder
+	visible := make([]campaign.Finding, 0, len(report.Findings))
+	for _, finding := range report.Findings {
+		if finding.Status == "non-viable" && !showNonViable {
+			continue
+		}
+		visible = append(visible, finding)
+	}
+	groups := make(map[string][]int)
+	for i, finding := range visible {
+		if key, ok := verifiedCheckKey(finding); ok {
+			groups[key] = append(groups[key], i)
+		}
+	}
+	emitted := make([]bool, len(visible))
+	for i, finding := range visible {
+		if emitted[i] {
+			continue
+		}
+		key, ok := verifiedCheckKey(finding)
+		if !ok || len(groups[key]) < 2 {
+			emitted[i] = true
+			writeFindingBody(&text, finding, "", true)
+			text.WriteByte('\n')
+			continue
+		}
+		members := groups[key]
+		var repWitness *campaign.Witness
+		var repSource *campaign.SourceWitness
+		for idx, memberIdx := range members {
+			emitted[memberIdx] = true
+			member := visible[memberIdx]
+			prefix := ""
+			if idx > 0 {
+				prefix = "+ "
 			}
+			writeFindingBody(&text, member, prefix, false)
+			if repWitness == nil && member.Witness != nil && member.Witness.Verified {
+				repWitness = member.Witness
+			}
+			if repSource == nil && member.SourceWitness != nil && member.SourceWitness.Verified {
+				repSource = member.SourceWitness
+			}
+		}
+		if repWitness != nil {
+			fmt.Fprintf(&text, "  shared check catches %d mutations: %s == %t (mutant: %t) [verified]\n",
+				len(members), SanitizeInline(repWitness.Call), repWitness.Original, repWitness.Mutant)
+			writeSuggestion(&text, repWitness.Code)
+		} else if repSource != nil {
+			fmt.Fprintf(&text, "  shared check catches %d mutations: %s (original %s, mutant %s) [verified]\n",
+				len(members), SanitizeInline(repSource.Call), SanitizeInline(repSource.Original), SanitizeInline(repSource.Mutated))
+			if repSource.SuggestedFile != "" {
+				fmt.Fprintf(&text, "  suggested file: %s\n", SanitizeInline(repSource.SuggestedFile))
+			}
+			writeSuggestion(&text, repSource.Code)
 		}
 		text.WriteByte('\n')
 	}

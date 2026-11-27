@@ -54,6 +54,7 @@ type Config struct {
 	UndoChanges       bool
 	KilledFindings    bool
 	RequireTests      bool
+	WitnessPackage    string
 	Warn              io.Writer `json:"-"`
 }
 

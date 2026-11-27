@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"go/ast"
 	"go/format"
 	"io"
 	"os"
@@ -19,11 +20,12 @@ import (
 
 // SourceWitness is a test verified against the original source and a source edit.
 type SourceWitness struct {
-	Call     string `json:"call"`
-	Original string `json:"original"`
-	Mutated  string `json:"mutated"`
-	Code     string `json:"code"`
-	Verified bool   `json:"verified"`
+	Call          string `json:"call"`
+	Original      string `json:"original"`
+	Mutated       string `json:"mutated"`
+	Code          string `json:"code"`
+	SuggestedFile string `json:"suggested_file,omitempty"`
+	Verified      bool   `json:"verified"`
 }
 
 const sourceWitnessEnvironment = "TMT_GO_SOURCE_WITNESS_OUTPUT"
@@ -82,9 +84,41 @@ func (s *session) sourceWitness(ctx context.Context, job sourceJob) (*SourceWitn
 			continue
 		}
 		witness := SourceWitness{Call: call, Original: before[i], Mutated: after[i]}
-		return s.verifySourceWitness(ctx, dir, trial, original, mutated, witness)
+		verified, err := s.verifySourceWitness(ctx, dir, trial, original, mutated, witness)
+		if err != nil || verified == nil {
+			return verified, err
+		}
+		s.formatSourceWitnessForTarget(verified, trial, job.edit.File)
+		return verified, nil
 	}
 	return nil, ctx.Err()
+}
+
+func (s *session) formatSourceWitnessForTarget(witness *SourceWitness, trial sourceWitnessTrial, sourceFile string) {
+	baseName := strings.TrimSuffix(filepath.Base(sourceFile), ".go")
+	witness.SuggestedFile = s.rel(filepath.Join(trial.pkg.Dir, baseName+"_witness_test.go"))
+	fnName, _, hasParen := strings.Cut(witness.Call, "(")
+	if !hasParen || !ast.IsExported(fnName) {
+		return
+	}
+	extPkg, ok := s.externalWitnessTarget(sourceFile)
+	if !ok || extPkg.Path == trial.pkg.Path {
+		return
+	}
+	pkgName := extPkg.Name
+	if pkgName == "" {
+		pkgName = filepath.Base(extPkg.Dir)
+	}
+	qualifiedCall := trial.pkg.Name + "." + witness.Call
+	var body strings.Builder
+	fmt.Fprintf(&body, "package %s\n\nimport (\n\t\"testing\"\n\n\t%q\n)\n\n", pkgName, trial.pkg.Path)
+	fmt.Fprintf(&body, "func %s(t *testing.T) {\n\tif got := %s; got != %s {\n\t\tt.Fatalf(%q, got)\n\t}\n}\n",
+		trial.test, qualifiedCall, witness.Original, "got %v, want "+strings.ReplaceAll(witness.Original, "%", "%%"))
+	if formatted, err := format.Source([]byte(body.String())); err == nil {
+		witness.Call = qualifiedCall
+		witness.Code = string(formatted)
+		witness.SuggestedFile = s.rel(filepath.Join(extPkg.Dir, baseName+"_witness_test.go"))
+	}
 }
 
 func (s *session) collectSourceWitness(ctx context.Context, dir string, trial sourceWitnessTrial, src target.Replacement, collector string, count int) ([]string, error) {

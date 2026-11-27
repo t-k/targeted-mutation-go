@@ -39,6 +39,7 @@ type fileConfig struct {
 	Format            *string
 	Baseline          *string
 	Checkpoint        *string
+	WitnessPackage    *string
 
 	hasPatterns      bool
 	hasTestPatterns  bool
@@ -194,6 +195,12 @@ func assignConfigKey(cfg *fileConfig, key, val string) error {
 			return fmt.Errorf("%s: %w", key, err)
 		}
 		cfg.Checkpoint = &s
+	case "witness_package":
+		s, err := parseTOMLString(val)
+		if err != nil {
+			return fmt.Errorf("%s: %w", key, err)
+		}
+		cfg.WitnessPackage = &s
 	case "timeout":
 		s, err := parseTOMLString(val)
 		if err != nil {
@@ -389,6 +396,9 @@ func (fc fileConfig) apply(cfg *campaign.Config, format, baselinePath *string, s
 	}
 	if fc.Checkpoint != nil && !setFlags["checkpoint"] {
 		cfg.Checkpoint = resolvePath(*fc.Checkpoint)
+	}
+	if fc.WitnessPackage != nil && !setFlags["witness-package"] {
+		cfg.WitnessPackage = *fc.WitnessPackage
 	}
 }
 

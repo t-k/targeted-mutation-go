@@ -2,6 +2,7 @@ package campaign
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"regexp"
 	"slices"
@@ -121,9 +122,51 @@ func (s *session) recordSuggestedAssertion(ctx context.Context, f *Finding, bin 
 	if !slices.Contains(f.Tests, name) {
 		f.Tests = append(f.Tests, name)
 	}
-	if f.Witness == nil && job.site.Callable != "" && job.site.Domain != nil {
+	if f.Witness == nil && job.site.Domain != nil {
 		f.Witness = observedWitness(job, seen)
 	}
+	if (f.Witness == nil || f.Witness.Call == "") && f.Detail == "" {
+		var lines []string
+		if job.site.Domain == nil {
+			if cond := observedConditionDetail(job, seen); cond != "" {
+				lines = append(lines, cond)
+			}
+		}
+		if job.site.Callable == "" {
+			lines = append(lines, fmt.Sprintf("assertion code not synthesized: expression is not a direct top-level function return; check the call in %s", name))
+		}
+		if len(lines) > 0 {
+			f.Detail = strings.Join(lines, "\n")
+		}
+	}
+}
+
+func observedConditionDetail(job probeJob, seen analysis.Summary) string {
+	site, candidate := job.site, job.candidate
+	origMask := site.Op.Mask()
+	mutMask := candidate.Op.Mask()
+	if site.Float {
+		origMask = site.Op.FloatMask()
+		mutMask = candidate.Op.FloatMask()
+	}
+	for _, rel := range []struct {
+		flag uint64
+		sym  string
+	}{
+		{analysis.Equal, "=="},
+		{analysis.Less, "<"},
+		{analysis.Greater, ">"},
+	} {
+		if seen.Flags&rel.flag == 0 {
+			continue
+		}
+		orig := origMask&rel.flag != 0
+		mut := mutMask&rel.flag != 0
+		if orig != mut {
+			return fmt.Sprintf("distinguishing condition: %s %s %s (original: %t, mutant: %t)", site.Left, rel.sym, site.Right, orig, mut)
+		}
+	}
+	return ""
 }
 
 func leafTests(events []string) []string {

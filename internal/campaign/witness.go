@@ -251,9 +251,59 @@ func (s *session) runWitnessVerification(ctx context.Context, report *Report, di
 	if mutated.kind == "failed" && flags&24 == 24 && slices.Contains(mutated.failed, job.test) {
 		f.Witness.Verified = true
 		f.Witness.Code = job.code
+		if targetPkg, ok := s.externalWitnessTarget(job.probe.site.File); ok && ast.IsExported(job.probe.site.Callable) {
+			if srcPkg, found := s.packageForFile(job.probe.site.File); found && srcPkg.Path != targetPkg.Path {
+				qualifiedCall := srcPkg.Name + "." + f.Witness.Call
+				f.Witness.Call = qualifiedCall
+				f.Witness.Code = witnessAssertionCode(f.Witness, "t", "got", false)
+			}
+		}
 	} else {
 		f.Detail = "generated witness did not fail on the applied mutant"
 		report.Incomplete++
 	}
 	return nil
+}
+
+func (s *session) packageForFile(file string) (target.Package, bool) {
+	for _, pkg := range s.packages {
+		if slices.Contains(pkg.Paths, file) || filepath.Dir(file) == pkg.Dir {
+			return pkg, true
+		}
+	}
+	return target.Package{}, false
+}
+
+// externalWitnessTarget returns the external test package to target for witness
+// code formatting, either explicitly via --witness-package or automatically
+// when the source package has no tests of its own and all running test binaries
+// belong to external packages.
+func (s *session) externalWitnessTarget(sourceFile string) (target.Package, bool) {
+	srcPkg, ok := s.packageForFile(sourceFile)
+	if !ok {
+		return target.Package{}, false
+	}
+	if s.cfg.WitnessPackage != "" {
+		for _, pkg := range s.testPackages {
+			if pkg.Path == s.cfg.WitnessPackage || pkg.Name == s.cfg.WitnessPackage || s.rel(pkg.Dir) == filepath.ToSlash(strings.TrimPrefix(s.cfg.WitnessPackage, "./")) {
+				return pkg, pkg.Path != srcPkg.Path
+			}
+		}
+		return target.Package{}, false
+	}
+	if len(s.consumers) == 0 {
+		return target.Package{}, false
+	}
+	for _, bin := range s.consumers {
+		if bin.pkg == srcPkg.Path {
+			return target.Package{}, false
+		}
+	}
+	firstExternal := s.consumers[0].pkg
+	for _, pkg := range s.testPackages {
+		if pkg.Path == firstExternal {
+			return pkg, pkg.Path != srcPkg.Path
+		}
+	}
+	return target.Package{}, false
 }
