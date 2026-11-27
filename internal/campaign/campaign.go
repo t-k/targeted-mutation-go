@@ -53,6 +53,7 @@ type Config struct {
 	ShowUnreached     bool
 	UndoChanges       bool
 	KilledFindings    bool
+	RequireTests      bool
 	Warn              io.Writer `json:"-"`
 }
 
@@ -278,9 +279,22 @@ func Run(ctx context.Context, cfg Config) (Report, error) {
 		return report, err
 	}
 	if len(s.sites)+len(s.sources) == 0 {
+		s.warnNoSites(ctx, scope)
 		report.Evaluation = "no-sites"
 		report.Reconcile()
 		return report, nil
+	}
+	if countRunEvents(base.inventory) == 0 {
+		targetCount := report.Sites
+		if targetCount == 0 {
+			targetCount = len(s.sources)
+		}
+		if s.cfg.RequireTests {
+			return report, fmt.Errorf("0 tests ran for %d target site(s)/candidate(s); pass --test-package <PKG> to run tests from another package", targetCount)
+		}
+		if s.cfg.Warn != nil {
+			fmt.Fprintf(s.cfg.Warn, "warning: 0 tests ran for %d target site(s)/candidate(s); pass --test-package <PKG> to run tests from another package\n", targetCount)
+		}
 	}
 	if len(s.sites) > 0 {
 		for _, replacement := range s.replacements {
@@ -488,6 +502,31 @@ func Run(ctx context.Context, cfg Config) (Report, error) {
 	slices.SortStableFunc(report.Findings, compareFindings)
 	report.Reconcile()
 	return report, ctx.Err()
+}
+
+func (s *session) warnNoSites(ctx context.Context, scope target.Scope) {
+	if len(s.cfg.Lines) == 0 || s.cfg.Warn == nil {
+		return
+	}
+	if !s.cfg.Full && !s.cfg.SourceOnly {
+		setup, cancel := context.WithTimeout(ctx, s.cfg.BuildTimeout)
+		fullPkgs, err := target.Discover(setup, s.cfg.Dir, s.cfg.Patterns, s.cfg.Tags, scope,
+			target.Discovery{Full: true, IncludeGenerated: s.cfg.IncludeGenerated})
+		cancel()
+		if err == nil {
+			fullEdits := 0
+			for _, pkg := range fullPkgs {
+				for _, file := range pkg.Files {
+					fullEdits += len(file.Edits)
+				}
+			}
+			if fullEdits > 0 {
+				fmt.Fprintf(s.cfg.Warn, "note: no comparison sites matched --lines in default mode; %d source mutation candidate(s) available with --full\n", fullEdits)
+				return
+			}
+		}
+	}
+	fmt.Fprintln(s.cfg.Warn, "note: no mutation candidates matched --lines")
 }
 
 func countRunEvents(inventory map[string][]string) int {

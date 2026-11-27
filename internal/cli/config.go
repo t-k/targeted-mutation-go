@@ -34,6 +34,7 @@ type fileConfig struct {
 	UndoChanges       *bool
 	KilledFindings    *bool
 	ShowNonViable     *bool
+	RequireTests      *bool
 	Audit             *int
 	Format            *string
 	Baseline          *string
@@ -291,6 +292,12 @@ func assignConfigKey(cfg *fileConfig, key, val string) error {
 			return fmt.Errorf("%s: %w", key, err)
 		}
 		cfg.ShowNonViable = &b
+	case "require_tests":
+		b, err := parseTOMLBool(val)
+		if err != nil {
+			return fmt.Errorf("%s: %w", key, err)
+		}
+		cfg.RequireTests = &b
 	default:
 		return fmt.Errorf("unknown config key %q", key)
 	}
@@ -367,6 +374,9 @@ func (fc fileConfig) apply(cfg *campaign.Config, format, baselinePath *string, s
 	}
 	if fc.ShowNonViable != nil && !setFlags["show-non-viable"] {
 		*showNonViable = *fc.ShowNonViable
+	}
+	if fc.RequireTests != nil && !setFlags["require-tests"] {
+		cfg.RequireTests = *fc.RequireTests
 	}
 	if fc.Audit != nil && !setFlags["audit"] {
 		cfg.Audit = *fc.Audit

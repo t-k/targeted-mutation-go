@@ -60,6 +60,13 @@ func ReadBaseline(path string) (Baseline, error) {
 
 // WriteBaseline saves one complete set of known gaps in stable ID order.
 func WriteBaseline(path string, report campaign.Report, id func(campaign.Finding) string) error {
+	_, err := WriteBaselineCount(path, report, id)
+	return err
+}
+
+// WriteBaselineCount saves one complete set of known gaps in stable ID order
+// and returns the number of unique IDs written.
+func WriteBaselineCount(path string, report campaign.Report, id func(campaign.Finding) string) (int, error) {
 	document := baselineDocument{Schema: baselineSchema, IDs: []string{}}
 	for _, finding := range report.Findings {
 		if !IsGap(finding.Status) {
@@ -67,13 +74,16 @@ func WriteBaseline(path string, report campaign.Report, id func(campaign.Finding
 		}
 		stableID := findingID(finding, id)
 		if strings.TrimSpace(stableID) == "" {
-			return fmt.Errorf("baseline %q: gap at %s:%d has no stable ID", path, finding.File, finding.Line)
+			return 0, fmt.Errorf("baseline %q: gap at %s:%d has no stable ID", path, finding.File, finding.Line)
 		}
 		document.IDs = append(document.IDs, stableID)
 	}
 	slices.Sort(document.IDs)
 	document.IDs = slices.Compact(document.IDs)
-	return publishBaseline(path, document)
+	if err := publishBaseline(path, document); err != nil {
+		return 0, err
+	}
+	return len(document.IDs), nil
 }
 
 func publishBaseline(path string, document baselineDocument) error {

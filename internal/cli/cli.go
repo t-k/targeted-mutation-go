@@ -40,12 +40,13 @@ func Execute(ctx context.Context, args []string, out, errOut io.Writer) int {
 		fmt.Fprintln(out, SanitizeInline(version()))
 		return 0
 	}
-	if args[0] != "analyze" {
+	isBaselineCmd := args[0] == "baseline"
+	if args[0] != "analyze" && !isBaselineCmd {
 		fmt.Fprintf(safeErr, "unknown command %q\n", args[0])
 		usage(safeErr)
 		return 1
 	}
-	options := flag.NewFlagSet("analyze", flag.ContinueOnError)
+	options := flag.NewFlagSet(args[0], flag.ContinueOnError)
 	options.SetOutput(safeErr)
 	options.Usage = func() {
 		usage(safeErr)
@@ -80,6 +81,7 @@ func Execute(ctx context.Context, args []string, out, errOut io.Writer) int {
 	options.BoolVar(&cfg.ShowUnreached, "show-unreached", false, "include comparison sites the selected tests did not reach")
 	options.BoolVar(&cfg.UndoChanges, "undo-changes", false, "run tests with each edited Go hunk restored to --since")
 	options.BoolVar(&cfg.KilledFindings, "show-killed", false, "include killed mutants in the report")
+	options.BoolVar(&cfg.RequireTests, "require-tests", false, "fail with exit code 1 if target sites exist but 0 tests run")
 	showNonViable := options.Bool("show-non-viable", false, "include non-viable candidates in text output")
 	options.BoolVar(&cfg.List, "list", false, "preview mutation candidates without running tests")
 	options.StringVar(&cfg.Shard, "shard", "", "select the zero-based shard K/N")
@@ -92,6 +94,10 @@ func Execute(ctx context.Context, args []string, out, errOut io.Writer) int {
 	format := options.String("format", "text", "report format (text, json, jsonl, or sarif)")
 	baselinePath := options.String("baseline", "", "suppress known findings from this baseline file")
 	writeBaselinePath := options.String("write-baseline", "", "save findings from a complete campaign as a baseline")
+	var baselineOutPath *string
+	if isBaselineCmd {
+		baselineOutPath = options.String("out", "", "path to write the baseline file (required for baseline)")
+	}
 	configPath := options.String("config", "", "path to a .tmt.toml configuration file")
 	noConfig := options.Bool("no-config", false, "disable automatic .tmt.toml loading")
 	reordered, reorderErr := reorderAnalyzeArgs(options, args[1:])
@@ -158,9 +164,27 @@ func Execute(ctx context.Context, args []string, out, errOut io.Writer) int {
 		fmt.Fprintln(safeErr, "--verify-witnesses is incompatible with --conventional")
 		return 1
 	}
-	if cfg.List && (*baselinePath != "" || *writeBaselinePath != "") {
+	if cfg.List && (*baselinePath != "" || *writeBaselinePath != "" || isBaselineCmd) {
 		fmt.Fprintln(safeErr, "--baseline and --write-baseline require an evaluated campaign")
 		return 1
+	}
+	if isBaselineCmd {
+		if setFlags["baseline"] {
+			fmt.Fprintln(safeErr, "--baseline cannot be used with the baseline command")
+			return 1
+		}
+		*baselinePath = ""
+		if baselineOutPath != nil && *baselineOutPath != "" {
+			if *writeBaselinePath != "" && *writeBaselinePath != *baselineOutPath {
+				fmt.Fprintln(safeErr, "--out and --write-baseline specify different paths")
+				return 1
+			}
+			*writeBaselinePath = *baselineOutPath
+		}
+		if *writeBaselinePath == "" {
+			fmt.Fprintln(safeErr, "baseline requires --out <FILE> (or --write-baseline <FILE>)")
+			return 1
+		}
 	}
 	cfg.Patterns = options.Args()
 	if len(cfg.Patterns) == 0 && loadedConfig.hasPatterns {
@@ -193,9 +217,11 @@ func Execute(ctx context.Context, args []string, out, errOut io.Writer) int {
 	if *writeBaselinePath != "" {
 		if report.Incomplete != 0 {
 			fmt.Fprintln(safeErr, "cannot write a baseline from an incomplete campaign")
-		} else if err := reporting.WriteBaseline(*writeBaselinePath, report, findingID); err != nil {
+		} else if count, err := reporting.WriteBaselineCount(*writeBaselinePath, report, findingID); err != nil {
 			fmt.Fprintln(safeErr, err)
 			return 1
+		} else {
+			fmt.Fprintf(safeErr, "wrote baseline %s (%d findings)\n", *writeBaselinePath, count)
 		}
 	}
 	if *baselinePath != "" {
@@ -251,6 +277,9 @@ func Execute(ctx context.Context, args []string, out, errOut io.Writer) int {
 	if report.Incomplete != 0 {
 		return 3
 	}
+	if isBaselineCmd {
+		return 0
+	}
 	for _, finding := range report.Findings {
 		if reporting.IsGap(finding.Status) {
 			return 2
@@ -263,6 +292,7 @@ func findingID(f campaign.Finding) string { return f.ID }
 
 func usage(out io.Writer) {
 	fmt.Fprintln(out, "Usage: targeted-mutation-go analyze [flags] [packages...]")
+	fmt.Fprintln(out, "       targeted-mutation-go baseline --out <FILE> [flags] [packages...]")
 	fmt.Fprintln(out, "       targeted-mutation-go version")
 	fmt.Fprintln(out, "Package patterns default to ./...; pass analyze --help for all options.")
 }

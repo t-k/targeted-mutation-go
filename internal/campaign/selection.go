@@ -1,9 +1,11 @@
 package campaign
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"math"
+	"os"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -78,9 +80,30 @@ func explicitScope(dir string, selectors []string) (target.Scope, error) {
 		if err != nil {
 			return nil, fmt.Errorf("--lines %q: %w", selector, err)
 		}
+		if span.End < math.MaxInt {
+			data, err := os.ReadFile(path)
+			if err != nil {
+				return nil, fmt.Errorf("--lines %q: %w", selector, err)
+			}
+			lineCount := countFileLines(data)
+			if span.Start > lineCount {
+				return nil, fmt.Errorf("--lines %q: line %d exceeds file length (%d lines)", selector, span.Start, lineCount)
+			}
+		}
 		scope[path] = append(scope[path], span)
 	}
 	return scope, nil
+}
+
+func countFileLines(data []byte) int {
+	if len(data) == 0 {
+		return 0
+	}
+	lines := bytes.Count(data, []byte{'\n'})
+	if data[len(data)-1] != '\n' {
+		lines++
+	}
+	return lines
 }
 
 func intersectScope(a, b target.Scope) target.Scope {
