@@ -45,7 +45,23 @@ func (s *session) runSourceComparison(ctx context.Context, job sourceJob, reache
 	var probe probeJob
 	var result sourceResult
 	if site.IsSchemata() {
-		probe = probeJob{site: site, arithOp: job.edit.ArithOp, consumers: reached, finding: job.finding}
+		probe = probeJob{site: site, arithOp: job.edit.ArithOp, finding: job.finding}
+		for _, bin := range reached {
+			if schemataInfects(site, job.edit.ArithOp, bin.seen[site.ID]) {
+				probe.consumers = append(probe.consumers, bin)
+			}
+		}
+		probe.predicted = len(probe.consumers) == 0
+		result = sourceResult{skipped: len(reached) - len(probe.consumers)}
+		if probe.predicted && (s.cfg.VerifySurvivors || s.cfg.Conventional) {
+			probe.consumers = reached
+			result.skipped = 0
+		}
+		probe.finding.Status, probe.finding.Evidence = "source-survivor", "observed"
+		if len(probe.consumers) == 0 {
+			result.finding = probe.finding
+			return result
+		}
 	} else {
 		candidate := analysis.Candidate{Op: job.edit.Operator, Pivot: job.edit.Pivot, Shift: job.edit.Shift, Float: site.Float}
 		probe = probeJob{site: site, candidate: candidate, finding: job.finding}
@@ -100,6 +116,55 @@ func (s *session) runSourceComparison(ctx context.Context, job sourceJob, reache
 		}
 	}
 	return result
+}
+
+func schemataInfects(site *target.Site, op uint64, seen analysis.Summary) bool {
+	if seen.Flags == 0 {
+		return false
+	}
+	switch {
+	case site.Arith, site.Shift, site.Assign:
+		return seen.Below&(uint64(1)<<op) != 0
+	case site.Bool:
+		switch op {
+		case 1:
+			return seen.Flags&3 != 0
+		case 2:
+			return !site.Pure || seen.Flags&2 != 0
+		case 3:
+			return !site.Pure || seen.Flags&1 != 0
+		}
+		return true
+	case site.Logic:
+		switch op {
+		case 1:
+			return !site.PureRight || seen.Flags&3 != 0
+		case 2:
+			return !site.PureLeft || seen.Flags&1 != 0
+		case 3:
+			return !site.PureRight || seen.Flags&2 != 0
+		case 4:
+			return seen.Flags&7 != 0
+		case 5:
+			if !site.PureLeft || !site.PureRight {
+				return true
+			}
+			if site.ArithOp == 1 {
+				return seen.Flags&4 != 0
+			}
+			return seen.Flags&3 != 0
+		case 6:
+			if !site.PureLeft || !site.PureRight {
+				return true
+			}
+			if site.ArithOp == 1 {
+				return seen.Flags&3 != 0
+			}
+			return seen.Flags&4 != 0
+		}
+		return true
+	}
+	return true
 }
 
 func (job sourceJob) materialize() target.Replacement {

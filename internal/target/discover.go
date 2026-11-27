@@ -63,6 +63,8 @@ type Site struct {
 	Line, Column            int
 	StartLine, EndLine      int
 	Start, End, OperatorAt  int
+	LeftStart, LeftEnd      int
+	RightStart, RightEnd    int
 	LiteralAt               int
 	Left, Right, Expression string
 	Op                      analysis.Operator
@@ -74,12 +76,22 @@ type Site struct {
 	Float, Margin           bool
 	Arith                   bool
 	Bool                    bool
+	Logic                   bool
+	Shift                   bool
+	UntypedShift            bool
+	Assign                  bool
+	IncDec                  bool
 	ArithOp                 uint64
 	CanDropOperands         bool
+	CanDropLeft             bool
+	CanDropRight            bool
+	Pure                    bool
+	PureLeft                bool
+	PureRight               bool
 }
 
 func (s *Site) IsSchemata() bool {
-	return s != nil && (s.Arith || s.Bool)
+	return s != nil && (s.Arith || s.Bool || s.Logic || s.Shift || s.Assign)
 }
 
 type Edit struct {
@@ -267,6 +279,56 @@ func findSites(file *File, tree *ast.File, positions *token.File, pkg *packages.
 func findFunctionSites(file *File, fn *ast.FuncDecl, positions *token.File, pkg *packages.Package, scope Scope, full, stringsOK bool, text func(ast.Node) string) {
 	var stack []ast.Node
 	safety := make(map[ast.Stmt]bool)
+	localReads := countLocalReads(fn, pkg.TypesInfo)
+	covered := make(map[Span]bool)
+	canDrop := func(expr ast.Expr) bool {
+		return canDropWithoutCompileError(expr, localReads, pkg.TypesInfo)
+	}
+	addSite := func(site *Site) bool {
+		span := Span{Start: site.Start, End: site.End}
+		if covered[span] {
+			return false
+		}
+		covered[span] = true
+		file.Sites = append(file.Sites, site)
+		return true
+	}
+	addBoolCondSite := func(expr ast.Expr, stmt ast.Stmt) {
+		if !full || expr == nil {
+			return
+		}
+		cond := ast.Unparen(expr)
+		if pkg.TypesInfo.Types[cond].Value != nil {
+			return
+		}
+		switch c := cond.(type) {
+		case *ast.BinaryExpr:
+			if operator(c.Op) != 0 || c.Op == token.LAND || c.Op == token.LOR {
+				return
+			}
+		case *ast.UnaryExpr:
+			if c.Op == token.NOT {
+				return
+			}
+		}
+		if !isPlainBool(pkg.TypesInfo.TypeOf(cond)) || !safeEvaluation(stmt, pkg.TypesInfo) {
+			return
+		}
+		start := positions.PositionFor(cond.Pos(), false)
+		end := positions.PositionFor(cond.End()-1, false)
+		if !scope.Contains(file.Path, start.Line, end.Line) {
+			return
+		}
+		pure := noPanicExpr(cond, pkg.TypesInfo)
+		addSite(&Site{
+			File: file.Path, Line: start.Line, Column: start.Column,
+			StartLine: start.Line, EndLine: end.Line,
+			Start: start.Offset, End: positions.Offset(cond.End()), OperatorAt: start.Offset,
+			Expression: text(cond), Bool: true,
+			Pure:            pure,
+			CanDropOperands: pure && canDrop(cond),
+		})
+	}
 	ast.Inspect(fn.Body, func(node ast.Node) (visit bool) {
 		if node == nil {
 			stack = stack[:len(stack)-1]
@@ -286,11 +348,11 @@ func findFunctionSites(file *File, fn *ast.FuncDecl, positions *token.File, pkg 
 					pos := positions.PositionFor(ident.Pos(), false)
 					end := positions.PositionFor(ident.End()-1, false)
 					if scope.Contains(file.Path, pos.Line, end.Line) {
-						file.Sites = append(file.Sites, &Site{
+						addSite(&Site{
 							File: file.Path, Line: pos.Line, Column: pos.Column,
 							StartLine: pos.Line, EndLine: end.Line,
 							Start: pos.Offset, End: positions.Offset(ident.End()), OperatorAt: pos.Offset,
-							Expression: text(ident), Bool: true, CanDropOperands: true,
+							Expression: text(ident), Bool: true, Pure: true, CanDropOperands: true,
 						})
 					}
 				}
@@ -298,23 +360,76 @@ func findFunctionSites(file *File, fn *ast.FuncDecl, positions *token.File, pkg 
 			return false
 		}
 		switch expr := node.(type) {
+		case *ast.IfStmt:
+			addBoolCondSite(expr.Cond, expr)
+		case *ast.ForStmt:
+			addBoolCondSite(expr.Cond, expr)
+		case *ast.ReturnStmt:
+			if full {
+				for _, res := range expr.Results {
+					addBoolCondSite(res, expr)
+				}
+			}
+		case *ast.IncDecStmt:
+			if full && safeEvaluation(expr, pkg.TypesInfo) && validOperand(expr.X, pkg.TypesInfo) &&
+				isAddressableInteger(expr.X, pkg.TypesInfo) {
+				pos := positions.PositionFor(expr.TokPos, false)
+				start := positions.PositionFor(expr.Pos(), false)
+				end := positions.PositionFor(expr.End()-1, false)
+				if scope.Contains(file.Path, start.Line, end.Line) {
+					op := uint64(1)
+					if expr.Tok == token.DEC {
+						op = 2
+					}
+					addSite(&Site{
+						File: file.Path, Line: pos.Line, Column: pos.Column,
+						StartLine: start.Line, EndLine: end.Line,
+						Start: start.Offset, End: positions.Offset(expr.End()), OperatorAt: pos.Offset,
+						LeftStart: positions.Offset(expr.X.Pos()), LeftEnd: positions.Offset(expr.X.End()),
+						Left: text(expr.X), Expression: text(expr),
+						Assign: true, IncDec: true, ArithOp: op,
+					})
+					return true
+				}
+			}
+		case *ast.AssignStmt:
+			if full && len(expr.Lhs) == 1 && len(expr.Rhs) == 1 {
+				if code := compoundArithCode(expr.Tok); code != 0 && safeEvaluation(expr, pkg.TypesInfo) &&
+					validOperand(expr.Lhs[0], pkg.TypesInfo) && validOperand(expr.Rhs[0], pkg.TypesInfo) &&
+					makeCompoundAssignSite(expr.Lhs[0], expr.Rhs[0], pkg.TypesInfo) {
+					pos := positions.PositionFor(expr.TokPos, false)
+					start := positions.PositionFor(expr.Pos(), false)
+					end := positions.PositionFor(expr.End()-1, false)
+					if scope.Contains(file.Path, start.Line, end.Line) {
+						addSite(&Site{
+							File: file.Path, Line: pos.Line, Column: pos.Column,
+							StartLine: start.Line, EndLine: end.Line,
+							Start: start.Offset, End: positions.Offset(expr.End()), OperatorAt: pos.Offset,
+							LeftStart: positions.Offset(expr.Lhs[0].Pos()), LeftEnd: positions.Offset(expr.Lhs[0].End()),
+							RightStart: positions.Offset(expr.Rhs[0].Pos()), RightEnd: positions.Offset(expr.Rhs[0].End()),
+							Left: text(expr.Lhs[0]), Right: text(expr.Rhs[0]), Expression: text(expr),
+							Assign: true, ArithOp: code,
+						})
+					}
+				}
+			}
 		case *ast.UnaryExpr:
 			if full && expr.Op == token.NOT &&
-				types.Identical(pkg.TypesInfo.TypeOf(expr), types.Typ[types.Bool]) &&
-				safeStatement(stack, pkg.TypesInfo, safety) && !inCaseOrKey(expr, stack) &&
-				!hasNestedComparison(expr) {
+				isPlainBool(pkg.TypesInfo.TypeOf(expr)) &&
+				safeStatement(stack, pkg.TypesInfo, safety) && !inCaseOrKey(expr, stack) {
 				pos := positions.PositionFor(expr.OpPos, false)
 				start := positions.PositionFor(expr.Pos(), false)
 				end := positions.PositionFor(expr.End()-1, false)
 				if scope.Contains(file.Path, start.Line, end.Line) {
-					file.Sites = append(file.Sites, &Site{
+					pure := noPanicExpr(expr.X, pkg.TypesInfo)
+					addSite(&Site{
 						File: file.Path, Line: pos.Line, Column: pos.Column,
 						StartLine: start.Line, EndLine: end.Line,
 						Start: start.Offset, End: positions.Offset(expr.End()), OperatorAt: pos.Offset,
 						Expression: text(expr), Bool: true,
-						CanDropOperands: parameterOrLiteralOrNil(expr.X, fn, pkg.TypesInfo),
+						Pure:            pure,
+						CanDropOperands: pure && canDrop(expr),
 					})
-					return false
 				}
 			}
 		case *ast.BinaryExpr:
@@ -324,16 +439,24 @@ func findFunctionSites(file *File, fn *ast.FuncDecl, positions *token.File, pkg 
 			if !scope.Contains(file.Path, start.Line, end.Line) {
 				return true
 			}
+			leftStart, leftEnd := positions.Offset(expr.X.Pos()), positions.Offset(expr.X.End())
+			rightStart, rightEnd := positions.Offset(expr.Y.Pos()), positions.Offset(expr.Y.End())
 			op := operator(expr.Op)
 			if op != 0 && safeStatement(stack, pkg.TypesInfo, safety) && validOperand(expr.X, pkg.TypesInfo) && validOperand(expr.Y, pkg.TypesInfo) {
 				site := &Site{
 					File: file.Path, Line: pos.Line, Column: pos.Column,
 					StartLine: start.Line, EndLine: end.Line,
-					Start: start.Offset, End: positions.Offset(expr.End()), OperatorAt: pos.Offset, Op: op,
-					Left: text(expr.X), Right: text(expr.Y), Expression: text(expr),
+					Start: start.Offset, End: positions.Offset(expr.End()), OperatorAt: pos.Offset,
+					LeftStart: leftStart, LeftEnd: leftEnd,
+					RightStart: rightStart, RightEnd: rightEnd,
+					Op: op, Left: text(expr.X), Right: text(expr.Y), Expression: text(expr),
 				}
 				site.String = stringsOK && stringOperands(expr, pkg.TypesInfo)
 				if site.String || makeIntegerSite(site, expr, fn, pkg) || makeFloatSite(site, expr, pkg.TypesInfo) {
+					if site.Reversed {
+						site.LeftStart, site.RightStart = site.RightStart, site.LeftStart
+						site.LeftEnd, site.RightEnd = site.RightEnd, site.LeftEnd
+					}
 					if full && site.Domain != nil {
 						constantOperand := expr.Y
 						if site.Reversed {
@@ -343,32 +466,72 @@ func findFunctionSites(file *File, fn *ast.FuncDecl, positions *token.File, pkg 
 							site.LiteralAt = positions.Offset(literal.Pos())
 						}
 					}
-					site.CanDropOperands = full && parameterOrLiteral(expr.X, fn, pkg.TypesInfo) && parameterOrLiteral(expr.Y, fn, pkg.TypesInfo)
-					file.Sites = append(file.Sites, site)
-					return false
+					site.Pure = noPanicExpr(expr.X, pkg.TypesInfo) && noPanicExpr(expr.Y, pkg.TypesInfo)
+					site.CanDropOperands = full && site.Pure && canDrop(expr)
+					addSite(site)
+					return true
 				}
 				if full && (expr.Op == token.EQL || expr.Op == token.NEQ) &&
-					types.Identical(pkg.TypesInfo.TypeOf(expr), types.Typ[types.Bool]) &&
-					!inCaseOrKey(expr, stack) && !hasNestedComparison(expr.X) && !hasNestedComparison(expr.Y) {
+					isPlainBool(pkg.TypesInfo.TypeOf(expr)) &&
+					!inCaseOrKey(expr, stack) {
 					site.Op = 0
 					site.Bool = true
-					site.CanDropOperands = parameterOrLiteralOrNil(expr.X, fn, pkg.TypesInfo) && parameterOrLiteralOrNil(expr.Y, fn, pkg.TypesInfo)
-					file.Sites = append(file.Sites, site)
-					return false
+					site.Pure = noPanicExpr(expr, pkg.TypesInfo)
+					site.CanDropOperands = site.Pure && canDrop(expr)
+					addSite(site)
+					return true
 				}
+			} else if full && (expr.Op == token.LAND || expr.Op == token.LOR) &&
+				isPlainBool(pkg.TypesInfo.TypeOf(expr)) &&
+				safeStatement(stack, pkg.TypesInfo, safety) && !inCaseOrKey(expr, stack) {
+				logicOp := uint64(1)
+				if expr.Op == token.LOR {
+					logicOp = 2
+				}
+				addSite(&Site{
+					File: file.Path, Line: pos.Line, Column: pos.Column,
+					StartLine: start.Line, EndLine: end.Line,
+					Start: start.Offset, End: positions.Offset(expr.End()), OperatorAt: pos.Offset,
+					LeftStart: leftStart, LeftEnd: leftEnd,
+					RightStart: rightStart, RightEnd: rightEnd,
+					Left: text(expr.X), Right: text(expr.Y), Expression: text(expr),
+					Logic: true, ArithOp: logicOp,
+					CanDropLeft:     canDrop(expr.X),
+					CanDropRight:    canDrop(expr.Y),
+					CanDropOperands: canDrop(expr),
+					PureLeft:        noPanicExpr(expr.X, pkg.TypesInfo),
+					PureRight:       noPanicExpr(expr.Y, pkg.TypesInfo),
+				})
+				return true
 			} else if full {
 				if code := arithCode(expr.Op); code != 0 && safeStatement(stack, pkg.TypesInfo, safety) &&
 					validOperand(expr.X, pkg.TypesInfo) && validOperand(expr.Y, pkg.TypesInfo) &&
 					makeArithSite(expr, pkg.TypesInfo) {
-					site := &Site{
+					addSite(&Site{
 						File: file.Path, Line: pos.Line, Column: pos.Column,
 						StartLine: start.Line, EndLine: end.Line,
 						Start: start.Offset, End: positions.Offset(expr.End()), OperatorAt: pos.Offset,
+						LeftStart: leftStart, LeftEnd: leftEnd,
+						RightStart: rightStart, RightEnd: rightEnd,
 						Left: text(expr.X), Right: text(expr.Y), Expression: text(expr),
 						Arith: true, ArithOp: code,
+					})
+					return true
+				}
+				if code := shiftCode(expr.Op); code != 0 && safeStatement(stack, pkg.TypesInfo, safety) &&
+					validOperand(expr.X, pkg.TypesInfo) && validOperand(expr.Y, pkg.TypesInfo) {
+					if ok, untyped := makeShiftSite(expr, pkg.TypesInfo); ok {
+						addSite(&Site{
+							File: file.Path, Line: pos.Line, Column: pos.Column,
+							StartLine: start.Line, EndLine: end.Line,
+							Start: start.Offset, End: positions.Offset(expr.End()), OperatorAt: pos.Offset,
+							LeftStart: leftStart, LeftEnd: leftEnd,
+							RightStart: rightStart, RightEnd: rightEnd,
+							Left: text(expr.X), Right: text(expr.Y), Expression: text(expr),
+							Shift: true, UntypedShift: untyped, ArithOp: code,
+						})
+						return true
 					}
-					file.Sites = append(file.Sites, site)
-					return false
 				}
 			}
 		}
@@ -400,6 +563,267 @@ func arithCode(tok token.Token) uint64 {
 	return 0
 }
 
+func shiftCode(tok token.Token) uint64 {
+	switch tok {
+	case token.SHL:
+		return 10
+	case token.SHR:
+		return 11
+	}
+	return 0
+}
+
+func compoundArithCode(tok token.Token) uint64 {
+	switch tok {
+	case token.ADD_ASSIGN:
+		return 1
+	case token.SUB_ASSIGN:
+		return 2
+	case token.MUL_ASSIGN:
+		return 3
+	case token.QUO_ASSIGN:
+		return 4
+	case token.REM_ASSIGN:
+		return 5
+	case token.AND_ASSIGN:
+		return 6
+	case token.OR_ASSIGN:
+		return 7
+	case token.XOR_ASSIGN:
+		return 8
+	case token.AND_NOT_ASSIGN:
+		return 9
+	}
+	return 0
+}
+
+func makeShiftSite(expr *ast.BinaryExpr, info *types.Info) (bool, bool) {
+	resType := info.TypeOf(expr)
+	if resType == nil {
+		return false, false
+	}
+	if _, tp := resType.(*types.TypeParam); tp {
+		return false, false
+	}
+	basic, ok := resType.Underlying().(*types.Basic)
+	if !ok || basic.Info()&types.IsInteger == 0 || basic.Info()&types.IsUntyped != 0 {
+		return false, false
+	}
+	if info.Types[expr.X].Value != nil {
+		return false, false
+	}
+	xType := info.TypeOf(expr.X)
+	if xType == nil || !types.Identical(xType, resType) || hasContextualShift(expr.X, info) {
+		return false, false
+	}
+	yTV := info.Types[expr.Y]
+	if yTV.Type == nil || hasContextualShift(expr.Y, info) {
+		return false, false
+	}
+	if _, tp := yTV.Type.(*types.TypeParam); tp {
+		return false, false
+	}
+	yBasic, ok := yTV.Type.Underlying().(*types.Basic)
+	if !ok {
+		return false, false
+	}
+	if yTV.Value != nil {
+		if constant.Sign(yTV.Value) < 0 {
+			return false, false
+		}
+		intVal := constant.ToInt(yTV.Value)
+		if intVal.Kind() != constant.Int {
+			return false, false
+		}
+		if _, exact := constant.Uint64Val(intVal); !exact {
+			return false, false
+		}
+		return true, yBasic.Info()&types.IsUntyped != 0
+	}
+	return yBasic.Info()&types.IsInteger != 0 && yBasic.Info()&types.IsUntyped == 0, false
+}
+
+func isAddressableInteger(expr ast.Expr, info *types.Info) bool {
+	tv := info.Types[expr]
+	if !tv.Addressable() || tv.Type == nil {
+		return false
+	}
+	if _, tp := tv.Type.(*types.TypeParam); tp {
+		return false
+	}
+	basic, ok := tv.Type.Underlying().(*types.Basic)
+	return ok && basic.Info()&types.IsInteger != 0 && basic.Info()&types.IsUntyped == 0
+}
+
+func makeCompoundAssignSite(lhs, rhs ast.Expr, info *types.Info) bool {
+	if !isAddressableInteger(lhs, info) {
+		return false
+	}
+	lhsType := info.TypeOf(lhs)
+	rhsTV := info.Types[rhs]
+	if rhsTV.Type == nil || hasContextualShift(rhs, info) {
+		return false
+	}
+	if rhsTV.Value != nil {
+		return true
+	}
+	return types.Identical(rhsTV.Type, lhsType)
+}
+
+func countLocalReads(fn *ast.FuncDecl, info *types.Info) map[*types.Var]int {
+	locals := make(map[*types.Var]bool)
+	ast.Inspect(fn.Body, func(n ast.Node) bool {
+		if id, ok := n.(*ast.Ident); ok {
+			if v, ok := info.Defs[id].(*types.Var); ok && !v.IsField() {
+				locals[v] = true
+			}
+		}
+		if v, ok := info.Implicits[n].(*types.Var); ok {
+			locals[v] = true
+		}
+		return true
+	})
+	if len(locals) == 0 {
+		return nil
+	}
+	reads := make(map[*types.Var]int, len(locals))
+	assignLHS := make(map[*ast.Ident]bool)
+	ast.Inspect(fn.Body, func(n ast.Node) bool {
+		if as, ok := n.(*ast.AssignStmt); ok && as.Tok == token.ASSIGN {
+			for _, lhs := range as.Lhs {
+				if id, ok := ast.Unparen(lhs).(*ast.Ident); ok {
+					assignLHS[id] = true
+				}
+			}
+		}
+		if id, ok := n.(*ast.Ident); ok && !assignLHS[id] {
+			if v, ok := info.Uses[id].(*types.Var); ok && locals[v] {
+				reads[v]++
+			}
+		}
+		return true
+	})
+	return reads
+}
+
+func canDropWithoutCompileError(expr ast.Expr, localReads map[*types.Var]int, info *types.Info) bool {
+	var usedInExpr map[*types.Var]int
+	safe := true
+	ast.Inspect(expr, func(n ast.Node) bool {
+		if !safe {
+			return false
+		}
+		id, ok := n.(*ast.Ident)
+		if !ok {
+			return true
+		}
+		obj := info.Uses[id]
+		if obj == nil {
+			return true
+		}
+		if _, isPkg := obj.(*types.PkgName); isPkg {
+			safe = false
+			return false
+		}
+		if v, ok := obj.(*types.Var); ok {
+			if total, isLocal := localReads[v]; isLocal {
+				if usedInExpr == nil {
+					usedInExpr = make(map[*types.Var]int)
+				}
+				usedInExpr[v]++
+				if usedInExpr[v] >= total {
+					safe = false
+					return false
+				}
+			}
+		}
+		return true
+	})
+	return safe
+}
+
+func noPanicExpr(expr ast.Expr, info *types.Info) bool {
+	if expr == nil {
+		return false
+	}
+	switch e := expr.(type) {
+	case *ast.BasicLit:
+		return true
+	case *ast.ParenExpr:
+		return noPanicExpr(e.X, info)
+	case *ast.Ident:
+		return true
+	case *ast.SelectorExpr:
+		sel := info.Selections[e]
+		if sel == nil {
+			return true
+		}
+		return !sel.Indirect() && noPanicExpr(e.X, info)
+	case *ast.UnaryExpr:
+		return e.Op != token.ARROW && noPanicExpr(e.X, info)
+	case *ast.BinaryExpr:
+		switch e.Op {
+		case token.QUO, token.REM:
+			tv := info.Types[e.Y]
+			if tv.Value == nil || constant.Sign(tv.Value) == 0 {
+				return false
+			}
+		case token.SHL, token.SHR:
+			tv := info.Types[e.Y]
+			if tv.Value == nil {
+				if tv.Type == nil {
+					return false
+				}
+				basic, ok := tv.Type.Underlying().(*types.Basic)
+				if !ok || basic.Info()&types.IsUnsigned == 0 {
+					return false
+				}
+			}
+		case token.EQL, token.NEQ:
+			xNil := isNilIdent(e.X, info)
+			yNil := isNilIdent(e.Y, info)
+			if !xNil && !yNil {
+				if !noPanicComparableType(info.TypeOf(e.X)) || !noPanicComparableType(info.TypeOf(e.Y)) {
+					return false
+				}
+			}
+		}
+		return noPanicExpr(e.X, info) && noPanicExpr(e.Y, info)
+	case *ast.CallExpr:
+		return isLenOrCap(e, info) && noPanicExpr(e.Args[0], info)
+	}
+	return false
+}
+
+func noPanicComparableType(t types.Type) bool {
+	if t == nil {
+		return false
+	}
+	switch u := t.Underlying().(type) {
+	case *types.Basic, *types.Pointer, *types.Chan:
+		return true
+	case *types.Array:
+		return noPanicComparableType(u.Elem())
+	case *types.Struct:
+		for i := range u.NumFields() {
+			if !noPanicComparableType(u.Field(i).Type()) {
+				return false
+			}
+		}
+		return true
+	}
+	return false
+}
+
+func isPlainBool(t types.Type) bool {
+	return t != nil && (types.Identical(t, types.Typ[types.Bool]) || types.Identical(t, types.Typ[types.UntypedBool]))
+}
+
+func isNilIdent(expr ast.Expr, info *types.Info) bool {
+	id, ok := ast.Unparen(expr).(*ast.Ident)
+	return ok && info.Uses[id] == types.Universe.Lookup("nil")
+}
+
 func makeArithSite(expr *ast.BinaryExpr, info *types.Info) bool {
 	resType := info.TypeOf(expr)
 	if resType == nil {
@@ -426,16 +850,7 @@ func makeArithSite(expr *ast.BinaryExpr, info *types.Info) bool {
 	if hasContextualShift(expr.X, info) || hasContextualShift(expr.Y, info) {
 		return false
 	}
-	// Do not shadow any nested comparison expression.
-	hasComparison := false
-	ast.Inspect(expr, func(n ast.Node) bool {
-		if b, ok := n.(*ast.BinaryExpr); ok && operator(b.Op) != 0 {
-			hasComparison = true
-			return false
-		}
-		return !hasComparison
-	})
-	return !hasComparison
+	return true
 }
 
 func hasContextualShift(expr ast.Expr, info *types.Info) bool {
@@ -569,7 +984,7 @@ func safeEvaluation(stmt ast.Stmt, info *types.Info) bool {
 			}
 		}
 		nodes = []ast.Node{s.X}
-	case *ast.ReturnStmt, *ast.AssignStmt, *ast.DeclStmt:
+	case *ast.ReturnStmt, *ast.AssignStmt, *ast.DeclStmt, *ast.IncDecStmt:
 		nodes = []ast.Node{stmt}
 	default:
 		return false

@@ -1,0 +1,6 @@
+SiteKind: nested-arith-in-cmp, logic-and, logic-or, bool-cond, shift, compound-assign
+Observation: infecting, non-infecting, short-circuit, unreached
+OperandSafety: pure-droppable, pointer-may-panic, sole-local
+Mode: full, verify-survivors, conventional
+
+IF [Observation] = "short-circuit" THEN [SiteKind] IN {"logic-and", "logic-or"};

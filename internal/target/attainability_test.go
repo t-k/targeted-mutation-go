@@ -213,9 +213,14 @@ func ConstIdx(i int) bool     { return ("A"[i]<<1)%4 >= 2 }
 		t.Fatalf("probe file %q must start with '0' (SafeArg) and sort before 0.go", probeBase)
 	}
 
-	sites := pkgs[0].Files[0].Sites
+	var sites []*Site
+	for _, s := range pkgs[0].Files[0].Sites {
+		if !s.IsSchemata() {
+			sites = append(sites, s)
+		}
+	}
 	if len(sites) != 6 {
-		t.Fatalf("expected 6 sites, got %d", len(sites))
+		t.Fatalf("expected 6 comparison sites, got %d (total %d)", len(sites), len(pkgs[0].Files[0].Sites))
 	}
 	if sites[5].Domain == nil || sites[5].Domain.Exact() {
 		t.Fatalf("ConstIdx ('A'[i]<<1)%%4 must be marked Conservative (!Exact), got %+v", sites[5].Domain)

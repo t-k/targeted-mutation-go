@@ -1,0 +1,97 @@
+
+type PROBEBoolType = bool
+
+func PROBELogic(site int, origOp uint64, leftFn, rightFn func() PROBEBoolType) PROBEBoolType {
+	state := PROBEGetState()
+	if state.slots == nil || site < 0 || site*5+5 > len(state.slots) {
+		if origOp == 1 {
+			return leftFn() && rightFn()
+		}
+		return leftFn() || rightFn()
+	}
+	if state.site >= 0 {
+		if state.site != site {
+			if origOp == 1 {
+				return leftFn() && rightFn()
+			}
+			return leftFn() || rightFn()
+		}
+		switch state.mask {
+		case 1:
+			PROBERecord(&state.slots[site*5], 8)
+			l := leftFn()
+			if origOp == 1 {
+				if l {
+					PROBERecord(&state.slots[site*5], 24)
+					return true
+				}
+				PROBERecord(&state.slots[site*5], 24)
+				return rightFn()
+			}
+			if !l {
+				PROBERecord(&state.slots[site*5], 24)
+				return false
+			}
+			PROBERecord(&state.slots[site*5], 24)
+			return rightFn()
+		case 2:
+			PROBERecord(&state.slots[site*5], 24)
+			return rightFn()
+		case 3:
+			PROBERecord(&state.slots[site*5], 8)
+			l := leftFn()
+			flags := uint64(8)
+			if (origOp == 1 && l) || (origOp == 2 && !l) {
+				flags |= 16
+			}
+			PROBERecord(&state.slots[site*5], flags)
+			return l
+		case 4:
+			PROBERecord(&state.slots[site*5], 8)
+			var orig bool
+			if origOp == 1 {
+				orig = leftFn() && rightFn()
+			} else {
+				orig = leftFn() || rightFn()
+			}
+			PROBERecord(&state.slots[site*5], 24)
+			return !orig
+		case 5:
+			PROBERecord(&state.slots[site*5], 24)
+			return false
+		case 6:
+			PROBERecord(&state.slots[site*5], 24)
+			return true
+		}
+		if origOp == 1 {
+			return leftFn() && rightFn()
+		}
+		return leftFn() || rightFn()
+	}
+	PROBERecord(&state.slots[site*5], 32)
+	l := leftFn()
+	if origOp == 1 {
+		if !l {
+			PROBERecord(&state.slots[site*5], 1)
+			return false
+		}
+		r := rightFn()
+		if !r {
+			PROBERecord(&state.slots[site*5], 2)
+			return false
+		}
+		PROBERecord(&state.slots[site*5], 4)
+		return true
+	}
+	if l {
+		PROBERecord(&state.slots[site*5], 1)
+		return true
+	}
+	r := rightFn()
+	if r {
+		PROBERecord(&state.slots[site*5], 2)
+		return true
+	}
+	PROBERecord(&state.slots[site*5], 4)
+	return false
+}

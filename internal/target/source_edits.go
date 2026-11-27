@@ -87,7 +87,16 @@ func (e *sourceEdits) visit(node ast.Node, ancestors []ast.Node) bool {
 	case *ast.AssignStmt:
 		e.assign(n, parent)
 	case *ast.IncDecStmt:
-		e.swap(n.TokPos, n.Tok, token.DEC, token.INC)
+		if edit := e.swap(n.TokPos, n.Tok, token.DEC, token.INC); edit != nil {
+			if site := e.probed[e.positions.Offset(n.TokPos)]; site != nil && site.Assign && site.IncDec {
+				edit.Site = site
+				if n.Tok == token.INC {
+					edit.ArithOp = 2
+				} else {
+					edit.ArithOp = 1
+				}
+			}
+		}
 		e.replace(n, "statement-remove", "_ = "+e.text(n.X))
 		e.remove(n, parent)
 	case *ast.ExprStmt, *ast.DeferStmt, *ast.GoStmt, *ast.SendStmt:
@@ -181,13 +190,14 @@ func (e *sourceEdits) operator(pos token.Pos, op, replacement token.Token) *Edit
 	return e.add(pos, pos+token.Pos(len(op.String())), pos, "source-operator", replacement.String())
 }
 
-func (e *sourceEdits) swap(pos token.Pos, original, first, second token.Token) {
+func (e *sourceEdits) swap(pos token.Pos, original, first, second token.Token) *Edit {
 	switch original {
 	case first:
-		e.operator(pos, original, second)
+		return e.operator(pos, original, second)
 	case second:
-		e.operator(pos, original, first)
+		return e.operator(pos, original, first)
 	}
+	return nil
 }
 
 func (e *sourceEdits) binary(n *ast.BinaryExpr, parent ast.Node) {
@@ -215,6 +225,25 @@ func (e *sourceEdits) binary(n *ast.BinaryExpr, parent ast.Node) {
 								edit.Site, edit.ArithOp = site, repCode
 							}
 						}
+					}
+					continue
+				}
+				if site.Shift {
+					repCode := shiftCode(replacement)
+					if repCode != 0 {
+						edited := *n
+						edited.Op = replacement
+						if e.pkg.TypesInfo.Types[n].Value != nil || e.check(n.Pos(), &edited) {
+							if edit := e.operator(n.OpPos, n.Op, replacement); edit != nil {
+								edit.Site, edit.ArithOp = site, repCode
+							}
+						}
+					}
+					continue
+				}
+				if site.Logic {
+					if edit := e.operator(n.OpPos, n.Op, replacement); edit != nil {
+						edit.Site, edit.ArithOp = site, 1
 					}
 					continue
 				}
@@ -249,15 +278,36 @@ func (e *sourceEdits) binary(n *ast.BinaryExpr, parent ast.Node) {
 				// Some peers edit source tokens and others print an edited AST.
 				e.operator(n.OpPos, n.Op, replacement)
 				if valid {
-					e.replace(n, "operator-grouping", "(("+e.text(n.X)+") "+replacement.String()+" ("+e.text(n.Y)+"))")
+					if edit := e.replace(n, "operator-grouping", "(("+e.text(n.X)+") "+replacement.String()+" ("+e.text(n.Y)+"))"); edit != nil && site != nil {
+						switch {
+						case site.Arith:
+							if repCode := arithCode(replacement); repCode != 0 {
+								edit.Site, edit.ArithOp = site, repCode
+							}
+						case site.Shift:
+							if repCode := shiftCode(replacement); repCode != 0 {
+								edit.Site, edit.ArithOp = site, repCode
+							}
+						case site.Logic:
+							edit.Site, edit.ArithOp = site, 1
+						}
+					}
 				}
 			}
 		}
 		break
 	}
 	if n.Op == token.LAND || n.Op == token.LOR {
-		e.boolean(n.X, n.Op == token.LAND, "boolean-operand")
-		e.boolean(n.Y, n.Op == token.LAND, "boolean-operand")
+		leftEdit := e.boolean(n.X, n.Op == token.LAND, "boolean-operand")
+		rightEdit := e.boolean(n.Y, n.Op == token.LAND, "boolean-operand")
+		if site != nil && site.Logic {
+			if leftEdit != nil && site.CanDropLeft && e.separatesBoolean(leftEdit) {
+				leftEdit.Site, leftEdit.ArithOp = site, 2
+			}
+			if rightEdit != nil && site.CanDropRight && e.separatesBoolean(rightEdit) {
+				rightEdit.Site, rightEdit.ArithOp = site, 3
+			}
+		}
 	}
 	if n.Op == token.NEQ && (e.errorAndNil(n.X, n.Y) || e.errorAndNil(n.Y, n.X)) {
 		e.boolean(n, false, "error-check")
@@ -527,14 +577,25 @@ func (e *sourceEdits) assign(n *ast.AssignStmt, parent ast.Node) {
 		}
 		return
 	}
+	site := e.probed[e.positions.Offset(n.TokPos)]
+	constZeroRHS := len(n.Rhs) == 1 && e.isIntegerConstant(n.Rhs[0], 0)
 	for _, family := range compoundFamilies {
 		if slices.Contains(family, n.Tok) {
 			for _, replacement := range family {
 				if replacement != n.Tok && !((n.Tok == token.ADD_ASSIGN || n.Tok == token.SUB_ASSIGN) && replacement == token.REM_ASSIGN) {
-					e.operator(n.TokPos, n.Tok, replacement)
+					if edit := e.operator(n.TokPos, n.Tok, replacement); edit != nil && site != nil && site.Assign && !site.IncDec {
+						if (replacement == token.QUO_ASSIGN || replacement == token.REM_ASSIGN) && constZeroRHS {
+							continue
+						}
+						if repCode := compoundArithCode(replacement); repCode != 0 {
+							edit.Site, edit.ArithOp = site, repCode
+						}
+					}
 				}
 			}
-			e.operator(n.TokPos, n.Tok, token.ASSIGN)
+			if edit := e.operator(n.TokPos, n.Tok, token.ASSIGN); edit != nil && site != nil && site.Assign && !site.IncDec {
+				edit.Site, edit.ArithOp = site, 10
+			}
 			break
 		}
 	}
@@ -565,11 +626,13 @@ func (e *sourceEdits) condition(expr ast.Expr) {
 			edit.Site, edit.Operator = site, site.Op.Negate()
 		} else if site := e.boolSite(expr); site != nil {
 			edit.Site, edit.ArithOp = site, 1
+		} else if site := e.logicSite(expr); site != nil {
+			edit.Site, edit.ArithOp = site, 4
 		}
 	}
 }
 
-func (e *sourceEdits) boolean(node ast.Node, value bool, kind string) {
+func (e *sourceEdits) boolean(node ast.Node, value bool, kind string) *Edit {
 	name := strconv.FormatBool(value)
 	text := name
 	if !e.nameAvailable(node.Pos(), name) {
@@ -581,7 +644,7 @@ func (e *sourceEdits) boolean(node ast.Node, value bool, kind string) {
 	if expr, ok := node.(ast.Expr); ok {
 		if current := e.pkg.TypesInfo.Types[expr].Value; current != nil &&
 			current.Kind() == constant.Bool && constant.BoolVal(current) == value {
-			return
+			return nil
 		}
 	}
 	if text[0] != '(' && followsIdentifierByte(e.file.Data, e.positions.Offset(node.Pos())) {
@@ -608,9 +671,16 @@ func (e *sourceEdits) boolean(node ast.Node, value bool, kind string) {
 				if value {
 					edit.ArithOp = 3
 				}
+			} else if site := e.logicSite(expr); site != nil && site.CanDropOperands && e.separatesBoolean(edit) && kind != "error-check" {
+				edit.Site = site
+				edit.ArithOp = 5
+				if value {
+					edit.ArithOp = 6
+				}
 			}
 		}
 	}
+	return edit
 }
 
 func (e *sourceEdits) separatesBoolean(edit *Edit) bool {
@@ -627,8 +697,9 @@ func (e *sourceEdits) comparison(expr ast.Expr) *Site {
 }
 
 func (e *sourceEdits) boolSite(expr ast.Expr) *Site {
+	unparen := ast.Unparen(expr)
 	var pos token.Pos
-	switch n := ast.Unparen(expr).(type) {
+	switch n := unparen.(type) {
 	case *ast.BinaryExpr:
 		pos = n.OpPos
 	case *ast.UnaryExpr:
@@ -636,10 +707,20 @@ func (e *sourceEdits) boolSite(expr ast.Expr) *Site {
 	case *ast.Ident:
 		pos = n.Pos()
 	default:
-		return nil
+		pos = unparen.Pos()
 	}
-	if site := e.probed[e.positions.Offset(pos)]; site != nil && site.Bool {
+	if site := e.probed[e.positions.Offset(pos)]; site != nil && site.Bool &&
+		site.Start == e.positions.Offset(unparen.Pos()) && site.End == e.positions.Offset(unparen.End()) {
 		return site
+	}
+	return nil
+}
+
+func (e *sourceEdits) logicSite(expr ast.Expr) *Site {
+	if bin, ok := ast.Unparen(expr).(*ast.BinaryExpr); ok && (bin.Op == token.LAND || bin.Op == token.LOR) {
+		if site := e.probed[e.positions.Offset(bin.OpPos)]; site != nil && site.Logic {
+			return site
+		}
 	}
 	return nil
 }

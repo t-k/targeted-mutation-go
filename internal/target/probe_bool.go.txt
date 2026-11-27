@@ -24,6 +24,10 @@ func PROBEBool(site int, value bool) bool {
 		PROBERecord(&state.slots[site*5], flags)
 		return mut
 	}
-	PROBERecord(&state.slots[site*5], 1)
+	bit := uint64(1)
+	if value {
+		bit = 2
+	}
+	PROBERecord(&state.slots[site*5], bit)
 	return value
 }
