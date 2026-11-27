@@ -252,10 +252,17 @@ func (s *session) runWitnessVerification(ctx context.Context, report *Report, di
 		f.Witness.Verified = true
 		f.Witness.Code = job.code
 		if targetPkg, ok := s.externalWitnessTarget(job.probe.site.File); ok && ast.IsExported(job.probe.site.Callable) {
-			if srcPkg, found := s.packageForFile(job.probe.site.File); found && srcPkg.Path != targetPkg.Path {
+			if srcPkg, found := s.packageForFile(job.probe.site.File); found && srcPkg.Path != targetPkg.Path && srcPkg.Name != "main" {
 				qualifiedCall := srcPkg.Name + "." + f.Witness.Call
+				param, gotVar := "t", "got"
+				if srcPkg.Name == "t" || witnessUsesIdent(qualifiedCall, "t") {
+					param = "tmtT"
+				}
+				if srcPkg.Name == "got" || witnessUsesIdent(qualifiedCall, "got") {
+					gotVar = "tmtGot"
+				}
 				f.Witness.Call = qualifiedCall
-				f.Witness.Code = witnessAssertionCode(f.Witness, "t", "got", false)
+				f.Witness.Code = witnessAssertionCode(f.Witness, param, gotVar, false)
 			}
 		}
 	} else {

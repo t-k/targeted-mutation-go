@@ -231,9 +231,14 @@ targeted-mutation-go analyze --full --suggest-assertions --since "$base" --undo-
 # Target specific lines in one package while running integration tests from another package
 targeted-mutation-go analyze --lines internal/price/rates.go:40-80 --test-package ./integration/... --test '^TestRates$' ./internal/price
 
-# Incremental adoption: record existing gaps once, then block only new gaps in CI
-targeted-mutation-go analyze --full --write-baseline .tmt-baseline.json ./...
+# Incremental adoption: record existing gaps once (exit 0 on complete run), then block only new gaps in CI
+targeted-mutation-go baseline --out .tmt-baseline.json --full ./...
 targeted-mutation-go analyze --full --baseline .tmt-baseline.json --format sarif ./... > tmt.sarif
+
+# Or create a baseline via analyze --write-baseline under `set -e` (exit 2 means gaps were recorded):
+rc=0
+targeted-mutation-go analyze --full --write-baseline .tmt-baseline.json ./... || rc=$?
+if [ "$rc" -ne 0 ] && [ "$rc" -ne 2 ]; then exit "$rc"; fi
 
 # Deterministic 4-way CI sharding (preview candidates with --list, or evaluate shard 0 of 4)
 targeted-mutation-go analyze --full --shard 0/4 --format jsonl ./...
@@ -264,7 +269,7 @@ exclude_rules = [
 
 - **Diff-scoped findings (`--since REV`):** Restricts ordinary findings and summary counters to full AST spans intersecting changed lines in tracked `.go` files plus untracked `.go` files (intersected with `--lines` when both are given).
 - **Hunk & sub-hunk reversion (`--undo-changes`):** For modified tracked production `.go` files (excluding newly added `/dev/null` files and untracked files), restores each changed Git hunk to `REV`. Where an edited expression retains a byte-exact surrounding prefix or suffix anchor against `REV`, multi-addition edits are also split into independent AST sub-hunks—removing individual added `&&` / `||` clauses and added `Key: Value` fields in composite literals—reporting `UNTESTED CHANGE` if the suite still passes.
-- **Weakened-test detection (`--since REV`):** When any selected `*_test.go` file was modified, added, or deleted since `REV` (even if an entire test package directory was deleted), surviving and newly unreached mutations in unchanged production code are replayed against the `REV` tests overlaid onto the current production source. Any mutant that `REV` tests killed is flagged as `WEAKENED TEST`.
+- **Weakened-test detection (`--since REV`):** When any selected `*_test.go` file or package `testdata/` file was modified, added, or deleted since `REV` (even if an entire test package directory was deleted), surviving and newly unreached mutations in unchanged production code are replayed against the `REV` tests and Git-tracked `testdata/` overlaid onto the current production source. Any mutant that `REV` tests killed is flagged as `WEAKENED TEST`.
 
 ### CLI option reference
 
@@ -281,6 +286,7 @@ Flags and package patterns may appear in any order (`targeted-mutation-go analyz
 | `--undo-changes` | `false` | Restore modified tracked Go hunks and matched AST sub-hunks to `--since` (requires `--since`) |
 | `--lines <SPEC>` | — | Restrict mutations to `FILE`, `FILE:LINE`, or `FILE:FROM-TO` (repeatable; intersects `--since`) |
 | `--test-package <PKG>` | target patterns | Independent Go package pattern(s) to execute as the test suite (repeatable; unimported targets are still compile-checked) |
+| `--require-tests` | `false` | Fail with exit code `1` if target sites/candidates exist but `0` tests run (otherwise emits a warning on `stderr`) |
 | `--test <REGEX>` | — | Filter tests and subtests via Go's `-run` regular expression (errors if zero tests match) |
 | `--tags <TAGS>` | — | Comma-separated Go build tags passed to package loading, builds, and `go test` |
 | `--include-generated` | `false` | Also discover mutations in files carrying standard `// Code generated ... DO NOT EDIT.` headers |
@@ -302,6 +308,7 @@ Flags and package patterns may appear in any order (`targeted-mutation-go analyz
 | --- | --- | --- |
 | `--verify-survivors` | `false` | Replay comparison mutations whose recorded observations already predict survival |
 | `--verify-witnesses` | `false` | Compile and run synthesized witness tests for direct comparison calls and surviving source edits (incompatible with `--conventional`) |
+| `--witness-package <PKG>` | auto | Target test package for formatting verified witness calls and standalone test snippets (auto-targets external test packages when the source package has no tests) |
 | `--suggest-assertions` | `false` | Isolate tests for `ASSERTION GAP`s and verify concrete assertions (also runs source witnesses) |
 | `--audit <N>` | `0` | Rebuild up to `<N>` completed probe mutations as actual source edits and verify verdict agreement (requires probe execution; incompatible with `--source-only` and `--list`) |
 

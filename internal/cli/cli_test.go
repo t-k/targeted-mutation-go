@@ -139,14 +139,18 @@ func TestAllowed(t *testing.T) {
 		}
 	}
 	var stdout, stderr bytes.Buffer
-	code := Execute(context.Background(), []string{"analyze", "--dir", dir, "--lines", "topic.go:999", "."}, &stdout, &stderr)
-	if code != 1 || !strings.Contains(stderr.String(), "exceeds file length") {
-		t.Fatalf("expected out-of-range error (code 1), got code=%d stderr=%q", code, stderr.String())
+	for _, spec := range []string{"topic.go:999", "topic.go:5-999", "topic.go:9223372036854775807"} {
+		stdout.Reset()
+		stderr.Reset()
+		code := Execute(context.Background(), []string{"analyze", "--dir", dir, "--lines", spec, "."}, &stdout, &stderr)
+		if code != 1 || !strings.Contains(stderr.String(), "exceeds file length") {
+			t.Fatalf("--lines %q: expected out-of-range error (code 1), got code=%d stderr=%q", spec, code, stderr.String())
+		}
 	}
 
 	stdout.Reset()
 	stderr.Reset()
-	code = Execute(context.Background(), []string{"analyze", "--dir", dir, "--jobs=1", "--lines", "topic.go:6", "."}, &stdout, &stderr)
+	code := Execute(context.Background(), []string{"analyze", "--dir", dir, "--jobs=1", "--lines", "topic.go:6", "."}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("expected exit 0 for valid line with no default sites, got %d: stderr=%s", code, &stderr)
 	}
@@ -324,5 +328,38 @@ func TestBatch(t *testing.T) {
 	}
 	if matching < 2 {
 		t.Fatalf("expected JSON to preserve both findings for ingest.WithinBatchLimit(101), got %d in %+v", matching, report.Findings)
+	}
+}
+
+func TestWriteTextGroupsDistinctMutantValues(t *testing.T) {
+	report := campaign.Report{
+		Findings: []campaign.Finding{
+			{
+				Status: "source-survivor", File: "calc.go", Line: 10, Column: 5,
+				Expression: "10", Mutation: "9", Evidence: "source-replay",
+				SourceWitness: &campaign.SourceWitness{
+					Call: "Calc(1)", Original: "10", Mutated: "9", Verified: true,
+					Code: "package calc\n", SuggestedFile: "calc_witness_test.go",
+				},
+			},
+			{
+				Status: "source-survivor", File: "calc.go", Line: 10, Column: 5,
+				Expression: "10", Mutation: "11", Evidence: "source-replay",
+				SourceWitness: &campaign.SourceWitness{
+					Call: "Calc(1)", Original: "10", Mutated: "11", Verified: true,
+					Code: "package calc\n", SuggestedFile: "calc_witness_test.go",
+				},
+			},
+		},
+	}
+	var out bytes.Buffer
+	if err := writeText(&out, report, false); err != nil {
+		t.Fatal(err)
+	}
+	got := out.String()
+	if !strings.Contains(got, "mutant returns: 9") ||
+		!strings.Contains(got, "mutant returns: 11") ||
+		!strings.Contains(got, "shared check catches 2 mutations: Calc(1) == 10 [verified]") {
+		t.Fatalf("expected distinct mutant return values to be preserved, got:\n%s", got)
 	}
 }

@@ -767,6 +767,17 @@ func (s *session) build(ctx context.Context, overlay string, bin *consumer, jobs
 }
 
 func (s *session) buildTest(ctx context.Context, overlay string, bin *consumer, jobs int, skipVet bool) error {
+	hasBinary, err := s.buildTestOptional(ctx, overlay, bin, jobs, skipVet)
+	if err != nil {
+		return err
+	}
+	if !hasBinary {
+		return fmt.Errorf("missing test binary for %s", bin.pkg)
+	}
+	return nil
+}
+
+func (s *session) buildTestOptional(ctx context.Context, overlay string, bin *consumer, jobs int, skipVet bool) (bool, error) {
 	args := []string{"test", "-c", "-o", bin.binary, "-overlay=" + overlay, "-p=" + strconv.Itoa(jobs)}
 	if skipVet {
 		args = append(args, "-vet=off")
@@ -775,12 +786,15 @@ func (s *session) buildTest(ctx context.Context, overlay string, bin *consumer, 
 	args = append(args, bin.pkg)
 	build := runCommand(ctx, s.cfg.BuildTimeout, s.cfg.Dir, s.workerEnv(), "go", args...)
 	if build.kind != "passed" {
-		return fmt.Errorf("test build %s for %s:\n%s", build.kind, bin.pkg, build.detail)
+		return false, fmt.Errorf("test build %s for %s:\n%s", build.kind, bin.pkg, build.detail)
 	}
 	if _, err := os.Stat(bin.binary); err != nil {
-		return fmt.Errorf("missing test binary for %s: %w", bin.pkg, err)
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("missing test binary for %s: %w", bin.pkg, err)
 	}
-	return nil
+	return true, nil
 }
 
 func (s *session) runBinary(ctx context.Context, bin *consumer, trace, mutation, test string) commandResult {

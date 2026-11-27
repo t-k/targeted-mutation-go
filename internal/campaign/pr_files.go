@@ -102,11 +102,14 @@ func prTestPath(root, name string) (string, error) {
 }
 
 func prTestdataPath(root, name string) (string, error) {
+	if strings.ContainsRune(name, '\\') {
+		return "", nil
+	}
 	name = filepath.FromSlash(name)
 	if !filepath.IsLocal(name) || name != filepath.Clean(name) {
 		return "", nil
 	}
-	if _, ok := testdataOwnerDir(filepath.Join(root, name)); !ok {
+	if _, ok := testdataOwnerDir(root, filepath.Join(root, name)); !ok {
 		return "", nil
 	}
 	return prSafePath(root, name)
@@ -136,18 +139,23 @@ func prSafePath(root, name string) (string, error) {
 }
 
 // testdataOwnerDir returns the package directory immediately containing a
-// "testdata" path component, or ("", false) when path is not under testdata/.
-func testdataOwnerDir(path string) (string, bool) {
-	clean := filepath.Clean(path)
+// "testdata" path component within root, or ("", false) when path is not under
+// a testdata/ directory inside root.
+func testdataOwnerDir(root, path string) (string, bool) {
+	cleanRoot := filepath.Clean(root)
+	cleanPath := filepath.Clean(path)
+	rel, err := filepath.Rel(cleanRoot, cleanPath)
+	if err != nil || !filepath.IsLocal(rel) {
+		return "", false
+	}
 	sep := string(filepath.Separator)
-	parts := strings.Split(clean, sep)
+	parts := strings.Split(rel, sep)
 	for i, part := range parts {
-		if part == "testdata" && i > 0 && i < len(parts)-1 {
-			owner := strings.Join(parts[:i], sep)
-			if owner == "" && strings.HasPrefix(clean, sep) {
-				owner = sep
+		if part == "testdata" && i < len(parts)-1 {
+			if i == 0 {
+				return cleanRoot, true
 			}
-			return owner, true
+			return filepath.Join(cleanRoot, strings.Join(parts[:i], sep)), true
 		}
 	}
 	return "", false
@@ -190,7 +198,7 @@ func restorePreviousTestdata(ctx context.Context, repoDir, revision, pkgDir, des
 			continue
 		}
 		sub, ok := strings.CutPrefix(name, prefix)
-		if !ok || sub == "" {
+		if !ok || sub == "" || strings.ContainsRune(sub, '\\') {
 			continue
 		}
 		subPath := filepath.FromSlash(sub)

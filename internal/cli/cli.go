@@ -408,6 +408,16 @@ func writeText(out io.Writer, report campaign.Report, showNonViable bool) error 
 		members := groups[key]
 		var repWitness *campaign.Witness
 		var repSource *campaign.SourceWitness
+		distinctMutants := make(map[string]bool)
+		for _, memberIdx := range members {
+			member := visible[memberIdx]
+			if member.Witness != nil && member.Witness.Verified {
+				distinctMutants[fmt.Sprintf("%t", member.Witness.Mutant)] = true
+			} else if member.SourceWitness != nil && member.SourceWitness.Verified {
+				distinctMutants[member.SourceWitness.Mutated] = true
+			}
+		}
+		sameMutant := len(distinctMutants) == 1
 		for idx, memberIdx := range members {
 			emitted[memberIdx] = true
 			member := visible[memberIdx]
@@ -416,6 +426,13 @@ func writeText(out io.Writer, report campaign.Report, showNonViable bool) error 
 				prefix = "+ "
 			}
 			writeFindingBody(&text, member, prefix, false)
+			if !sameMutant {
+				if member.Witness != nil && member.Witness.Verified {
+					fmt.Fprintf(&text, "  mutant returns: %t\n", member.Witness.Mutant)
+				} else if member.SourceWitness != nil && member.SourceWitness.Verified {
+					fmt.Fprintf(&text, "  mutant returns: %s\n", SanitizeInline(member.SourceWitness.Mutated))
+				}
+			}
 			if repWitness == nil && member.Witness != nil && member.Witness.Verified {
 				repWitness = member.Witness
 			}
@@ -424,12 +441,22 @@ func writeText(out io.Writer, report campaign.Report, showNonViable bool) error 
 			}
 		}
 		if repWitness != nil {
-			fmt.Fprintf(&text, "  shared check catches %d mutations: %s == %t (mutant: %t) [verified]\n",
-				len(members), SanitizeInline(repWitness.Call), repWitness.Original, repWitness.Mutant)
+			if sameMutant {
+				fmt.Fprintf(&text, "  shared check catches %d mutations: %s == %t (mutant: %t) [verified]\n",
+					len(members), SanitizeInline(repWitness.Call), repWitness.Original, repWitness.Mutant)
+			} else {
+				fmt.Fprintf(&text, "  shared check catches %d mutations: %s == %t [verified]\n",
+					len(members), SanitizeInline(repWitness.Call), repWitness.Original)
+			}
 			writeSuggestion(&text, repWitness.Code)
 		} else if repSource != nil {
-			fmt.Fprintf(&text, "  shared check catches %d mutations: %s (original %s, mutant %s) [verified]\n",
-				len(members), SanitizeInline(repSource.Call), SanitizeInline(repSource.Original), SanitizeInline(repSource.Mutated))
+			if sameMutant {
+				fmt.Fprintf(&text, "  shared check catches %d mutations: %s (original %s, mutant %s) [verified]\n",
+					len(members), SanitizeInline(repSource.Call), SanitizeInline(repSource.Original), SanitizeInline(repSource.Mutated))
+			} else {
+				fmt.Fprintf(&text, "  shared check catches %d mutations: %s == %s [verified]\n",
+					len(members), SanitizeInline(repSource.Call), SanitizeInline(repSource.Original))
+			}
 			if repSource.SuggestedFile != "" {
 				fmt.Fprintf(&text, "  suggested file: %s\n", SanitizeInline(repSource.SuggestedFile))
 			}

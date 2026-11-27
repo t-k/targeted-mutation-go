@@ -471,3 +471,64 @@ func TestSummarizePreviousTestFailure(t *testing.T) {
 		t.Fatalf("unexpected summary:\n%s", got)
 	}
 }
+
+func TestTestdataOwnerDirAncestorNamedTestdata(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "testdata", "repo")
+	target := filepath.Join(root, "integration", "testdata", "cases.txt")
+	owner, ok := testdataOwnerDir(root, target)
+	if !ok || owner != filepath.Join(root, "integration") {
+		t.Fatalf("got (%q, %v), want (%q, true)", owner, ok, filepath.Join(root, "integration"))
+	}
+	nonData := filepath.Join(root, "integration", "policy.go")
+	if owner, ok := testdataOwnerDir(root, nonData); ok {
+		t.Fatalf("unexpected testdata owner for non-testdata path: %q", owner)
+	}
+}
+
+func TestTestlessPackageChangedTestdataDoesNotBreakWeakenedCheck(t *testing.T) {
+	dir := t.TempDir()
+	fixture(t, dir, "go.mod", "module example.org/testless-data\n\ngo 1.26.0\n")
+	fixture(t, dir, "policy.go", "package policy\nfunc Limit(n int) bool { return n <= 10 }\n")
+	fixture(t, dir, "testdata/note.txt", "v1\n")
+	fixture(t, dir, "integration/limit_test.go", `package policy_test
+import (
+	"testing"
+	policy "example.org/testless-data"
+)
+func TestLimit(t *testing.T) {
+	if !policy.Limit(10) || policy.Limit(11) || policy.Limit(20) {
+		t.Fatal("mismatch")
+	}
+}
+`)
+	commitPRBase(t, dir)
+	// Change testdata in the testless root package AND weaken the integration test.
+	fixture(t, dir, "testdata/note.txt", "v2\n")
+	fixture(t, dir, "integration/limit_test.go", `package policy_test
+import (
+	"testing"
+	policy "example.org/testless-data"
+)
+func TestLimit(t *testing.T) {
+	if !policy.Limit(10) || policy.Limit(20) {
+		t.Fatal("mismatch")
+	}
+}
+`)
+	report, err := Run(t.Context(), Config{Dir: dir, Patterns: []string{"./..."}, Since: "HEAD", Jobs: 1})
+	if err != nil {
+		t.Fatalf("Run failed: %v", err)
+	}
+	if report.Incomplete != 0 {
+		t.Fatalf("expected complete run even with testless package testdata change, got findings: %+v", report.Findings)
+	}
+	hasWeakened := false
+	for _, f := range report.Findings {
+		if f.Status == "weakened-test" {
+			hasWeakened = true
+		}
+	}
+	if !hasWeakened {
+		t.Fatalf("expected weakened-test finding, got %+v", report.Findings)
+	}
+}

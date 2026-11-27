@@ -53,7 +53,8 @@ func explicitScope(dir string, selectors []string) (target.Scope, error) {
 	for _, selector := range selectors {
 		file := selector
 		span := target.Span{Start: 1, End: math.MaxInt}
-		if !strings.HasSuffix(selector, ".go") {
+		hasLineRange := !strings.HasSuffix(selector, ".go")
+		if hasLineRange {
 			separator := strings.LastIndexByte(selector, ':')
 			if separator < 0 {
 				return nil, fmt.Errorf("invalid --lines %q: expected FILE, FILE:LINE, or FILE:FROM-TO", selector)
@@ -80,14 +81,14 @@ func explicitScope(dir string, selectors []string) (target.Scope, error) {
 		if err != nil {
 			return nil, fmt.Errorf("--lines %q: %w", selector, err)
 		}
-		if span.End < math.MaxInt {
+		if hasLineRange {
 			data, err := os.ReadFile(path)
 			if err != nil {
 				return nil, fmt.Errorf("--lines %q: %w", selector, err)
 			}
 			lineCount := countFileLines(data)
-			if span.Start > lineCount {
-				return nil, fmt.Errorf("--lines %q: line %d exceeds file length (%d lines)", selector, span.Start, lineCount)
+			if span.Start > lineCount || span.End > lineCount {
+				return nil, fmt.Errorf("--lines %q: line %d exceeds file length (%d lines)", selector, max(span.Start, span.End), lineCount)
 			}
 		}
 		scope[path] = append(scope[path], span)

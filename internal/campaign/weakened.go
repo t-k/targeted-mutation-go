@@ -53,9 +53,13 @@ func previousTestSelection(ctx context.Context, cfg Config) ([]target.Replacemen
 			dirs[pkg.Dir] = true
 		}
 	}
+	root, _, err := gitBase(ctx, cfg.Dir, cfg.Since)
+	if err != nil {
+		return nil, nil, err
+	}
 	testFiles = slices.DeleteFunc(testFiles, func(f target.Replacement) bool { return !dirs[filepath.Dir(f.Path)] })
 	testdataFiles = slices.DeleteFunc(testdataFiles, func(f target.Replacement) bool {
-		owner, ok := testdataOwnerDir(f.Path)
+		owner, ok := testdataOwnerDir(root, f.Path)
 		return !ok || !dirs[owner]
 	})
 	return slices.Concat(testFiles, testdataFiles), packages, nil
@@ -227,9 +231,13 @@ func isIncompleteVerdict(status string) bool {
 // directory populated with the base revision's Git-tracked testdata/.
 func (s *session) setVirtualDirs(ctx context.Context, files []target.Replacement) error {
 	changedTestdata := make(map[string]bool)
-	for _, f := range files {
-		if owner, ok := testdataOwnerDir(f.Path); ok {
-			changedTestdata[owner] = true
+	if s.cfg.Since != "" {
+		if root, _, err := gitBase(ctx, s.cfg.Dir, s.cfg.Since); err == nil {
+			for _, f := range files {
+				if owner, ok := testdataOwnerDir(root, f.Path); ok {
+					changedTestdata[owner] = true
+				}
+			}
 		}
 	}
 	for _, pkg := range s.testPackages {
@@ -390,8 +398,13 @@ func (s *session) goTestWithVirtualPackages(ctx context.Context, overlay string,
 	defer os.RemoveAll(dir)
 	for i, pkg := range virtual {
 		bin := consumer{pkg: pkg.Path, dir: s.testDirectory(pkg), binary: filepath.Join(dir, fmt.Sprintf("test-%d%s", i, exeSuffix()))}
-		if err := s.buildTest(ctx, overlay, &bin, 1, true); err != nil {
+		hasBinary, err := s.buildTestOptional(ctx, overlay, &bin, 1, true)
+		if err != nil {
 			return commandResult{kind: "error", detail: err.Error()}
+		}
+		if !hasBinary {
+			result.packages[pkg.Path] = "skip"
+			continue
 		}
 		run := s.runBinaryOptions(ctx, &bin, "", "", s.cfg.TestRun, failfast)
 		switch run.kind {

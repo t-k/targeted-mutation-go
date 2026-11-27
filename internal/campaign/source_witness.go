@@ -102,7 +102,7 @@ func (s *session) formatSourceWitnessForTarget(witness *SourceWitness, trial sou
 		return
 	}
 	extPkg, ok := s.externalWitnessTarget(sourceFile)
-	if !ok || extPkg.Path == trial.pkg.Path {
+	if !ok || extPkg.Path == trial.pkg.Path || trial.pkg.Name == "main" {
 		return
 	}
 	pkgName := extPkg.Name
@@ -110,10 +110,23 @@ func (s *session) formatSourceWitnessForTarget(witness *SourceWitness, trial sou
 		pkgName = filepath.Base(extPkg.Dir)
 	}
 	qualifiedCall := trial.pkg.Name + "." + witness.Call
+	testingImport := "\t\"testing\"\n"
+	testingType := "testing.T"
+	if trial.pkg.Name == "testing" {
+		testingImport = "\ttmtWitnessTesting \"testing\"\n"
+		testingType = "tmtWitnessTesting.T"
+	}
+	param, gotVar := "t", "got"
+	if trial.pkg.Name == "t" || witnessUsesIdent(qualifiedCall, "t") {
+		param = "tmtT"
+	}
+	if trial.pkg.Name == "got" || witnessUsesIdent(qualifiedCall, "got") {
+		gotVar = "tmtGot"
+	}
 	var body strings.Builder
-	fmt.Fprintf(&body, "package %s\n\nimport (\n\t\"testing\"\n\n\t%q\n)\n\n", pkgName, trial.pkg.Path)
-	fmt.Fprintf(&body, "func %s(t *testing.T) {\n\tif got := %s; got != %s {\n\t\tt.Fatalf(%q, got)\n\t}\n}\n",
-		trial.test, qualifiedCall, witness.Original, "got %v, want "+strings.ReplaceAll(witness.Original, "%", "%%"))
+	fmt.Fprintf(&body, "package %s\n\nimport (\n%s\n\t%q\n)\n\n", pkgName, testingImport, trial.pkg.Path)
+	fmt.Fprintf(&body, "func %s(%s *%s) {\n\tif %s := %s; %s != %s {\n\t\t%s.Fatalf(%q, %s)\n\t}\n}\n",
+		trial.test, param, testingType, gotVar, qualifiedCall, gotVar, witness.Original, param, "got %v, want "+strings.ReplaceAll(witness.Original, "%", "%%"), gotVar)
 	if formatted, err := format.Source([]byte(body.String())); err == nil {
 		witness.Call = qualifiedCall
 		witness.Code = string(formatted)
