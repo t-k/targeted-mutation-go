@@ -1,9 +1,0 @@
-# Targeted Mutation Testing for Go
-
-Use typed source instrumentation and test-binary reuse. The CLI discovers package boundaries and source types through the active Go toolchain and never edits the target checkout. An ordinary baseline and a probe baseline establish that the selected suite passes. The probe run records compact comparison observations in shared memory. Each mutation that changes an observation runs against the relevant package binaries in separate processes. An unchanged observation can eliminate a replay under the deterministic-suite assumption. Replay verification remains available. No analysis telemetry or external service is required.
-
-A finding identifies the source location, observed evidence, mutation, and when possible the nearest distinguishing input. A changed observation with passing tests is reported as an assertion gap. Candidates and verified inputs are separate evidence levels. An unexecuted site, incomplete run, build failure, and timeout have distinct meanings. JSON and CI exit codes are documented.
-
-The rewrite preserves source scope, types, short-circuiting, and operand evaluation for supported sites. Unsupported Go constructs must not be described as checked. Package-level observations preserve correctness with parallel and nested tests. Explicit Git scope works on the active working copy. Source-level replays handle edits that cannot safely share a test binary.
-
-Lean checks the integer comparison summary and the distinguishing input. TLC checks campaign scheduling and cancellation, baseline and activation requirements, and resource lifetime. PICT rows, exhaustive small domains, real Go modules, and mutation checks exercise the implementation. Benchmarks report actionable findings and like-for-like comparisons separately, with the same test scope, worker count, cache policy, Go version, and inputs.
