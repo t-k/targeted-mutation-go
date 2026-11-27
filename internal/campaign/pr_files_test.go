@@ -284,3 +284,190 @@ func TestPRSubhunksPICT(t *testing.T) {
 		})
 	}
 }
+
+func testdataRestoreRows(t *testing.T) [][]string {
+	t.Helper()
+	table, err := os.ReadFile("../../verification/pict/testdata-restore.tsv")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var rows [][]string
+	for _, row := range strings.Split(strings.TrimSpace(string(table)), "\n")[1:] {
+		rows = append(rows, strings.Split(strings.TrimSuffix(row, "\r"), "\t"))
+	}
+	return rows
+}
+
+func TestTestdataRestorePICT(t *testing.T) {
+	for _, row := range testdataRestoreRows(t) {
+		testChange, dataChange, mode := row[0], row[1], row[2]
+		t.Run(strings.Join(row, "/"), func(t *testing.T) {
+			dir := t.TempDir()
+			fixture(t, dir, "go.mod", "module example.org/testdata-restore\n\ngo 1.26.0\n")
+			fixture(t, dir, "policy.go", `package policy
+
+func Limit(n int) bool {
+	return n <= 10
+}
+`)
+			// Strong test reads threshold boundary inputs from testdata/cases.txt.
+			// Format: one integer per line; all must match Limit(n) == (n <= 10).
+			strongTest := `package policy_test
+
+import (
+	"os"
+	"strconv"
+	"strings"
+	"testing"
+
+	policy "example.org/testdata-restore"
+)
+
+func TestLimitFromData(t *testing.T) {
+	raw, err := os.ReadFile("testdata/cases.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, line := range strings.Split(strings.TrimSpace(string(raw)), "\n") {
+		if line == "" {
+			continue
+		}
+		n, err := strconv.Atoi(strings.TrimSpace(line))
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := n <= 10
+		if got := policy.Limit(n); got != want {
+			t.Fatalf("Limit(%d) = %v, want %v", n, got, want)
+		}
+	}
+}
+`
+			weakTest := `package policy_test
+
+import (
+	"testing"
+
+	policy "example.org/testdata-restore"
+)
+
+func TestLimitWeak(t *testing.T) {
+	if !policy.Limit(10) {
+		t.Fatal("10 should pass")
+	}
+	if policy.Limit(20) {
+		t.Fatal("20 should fail")
+	}
+}
+`
+			strongData := "10\n11\n20\n"
+			weakData := "10\n20\n"
+
+			fixture(t, dir, "integration/limit_test.go", strongTest)
+			fixture(t, dir, "integration/testdata/cases.txt", strongData)
+			commitPRBase(t, dir)
+
+			// Apply working-tree mutations per PICT row.
+			switch testChange {
+			case "modified":
+				fixture(t, dir, "integration/limit_test.go", weakTest)
+			case "deleted_file":
+				if err := os.Remove(filepath.Join(dir, "integration", "limit_test.go")); err != nil {
+					t.Fatal(err)
+				}
+				fixture(t, dir, "integration/weak_test.go", weakTest)
+			case "deleted_dir":
+				if err := os.RemoveAll(filepath.Join(dir, "integration")); err != nil {
+					t.Fatal(err)
+				}
+				fixture(t, dir, "fallback_test.go", strings.ReplaceAll(weakTest, "package policy_test", "package policy_test"))
+			case "unchanged":
+			}
+
+			if testChange != "deleted_dir" {
+				switch dataChange {
+				case "deleted_file":
+					if err := os.Remove(filepath.Join(dir, "integration", "testdata", "cases.txt")); err != nil {
+						t.Fatal(err)
+					}
+					if testChange == "unchanged" {
+						// When test is unchanged and data is deleted, make test tolerate missing file
+						// so current baseline passes while losing coverage.
+						fixture(t, dir, "integration/limit_test.go", strings.Replace(strongTest, "t.Fatal(err)", "return", 1))
+					}
+				case "modified_file":
+					fixture(t, dir, "integration/testdata/cases.txt", weakData)
+				case "added_file":
+					fixture(t, dir, "integration/testdata/extra.txt", "extra\n")
+				case "none":
+				}
+			}
+
+			cfg := Config{
+				Dir:        dir,
+				Patterns:   []string{"./..."},
+				Since:      "HEAD",
+				Jobs:       1,
+				SourceOnly: mode == "source",
+			}
+			report, err := Run(t.Context(), cfg)
+			if err != nil {
+				t.Fatalf("Run failed: %v", err)
+			}
+			if report.Incomplete != 0 {
+				t.Fatalf("unexpected incomplete report: %+v", report.Findings)
+			}
+
+			expectWeakened := testChange != "unchanged" || dataChange == "deleted_file" || dataChange == "modified_file"
+			hasWeakened := false
+			for _, f := range report.Findings {
+				if f.Status == "weakened-test" {
+					hasWeakened = true
+					break
+				}
+			}
+			if expectWeakened && !hasWeakened {
+				t.Fatalf("expected weakened-test finding, got %+v", report.Findings)
+			}
+			if !expectWeakened && hasWeakened {
+				t.Fatalf("unexpected weakened-test finding: %+v", report.Findings)
+			}
+		})
+	}
+}
+
+func TestPreviousTestdataSkipsSymlinks(t *testing.T) {
+	dir := t.TempDir()
+	outside := t.TempDir()
+	fixture(t, dir, "integration/testdata/cases.txt", "10\n")
+	commitPRBase(t, dir)
+	if err := os.RemoveAll(filepath.Join(dir, "integration", "testdata")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(dir, "integration", "testdata")); err != nil {
+		t.Fatal(err)
+	}
+	files, err := previousTestdataFiles(t.Context(), dir, "HEAD")
+	if err != nil || len(files) != 0 {
+		t.Fatalf("accepted symlinked testdata: %+v, %v", files, err)
+	}
+}
+
+func TestSummarizePreviousTestFailure(t *testing.T) {
+	rawJSON := strings.Join([]string{
+		`{"Action":"run","Package":"example.test/p","Test":"TestFoo"}`,
+		`{"Action":"output","Package":"example.test/p","Test":"TestFoo","Output":"=== RUN   TestFoo\n"}`,
+		`{"Action":"output","Package":"example.test/p","Test":"TestFoo","Output":"    foo_test.go:17: open ../external.tsv: no such file or directory\n"}`,
+		`{"Action":"output","Package":"example.test/p","Test":"TestFoo","Output":"--- FAIL: TestFoo (0.00s)\n"}`,
+		`{"Action":"fail","Package":"example.test/p","Test":"TestFoo"}`,
+	}, "\n")
+	got := summarizePreviousTestFailure("failed", rawJSON)
+	if strings.Contains(got, `"Action"`) {
+		t.Fatalf("summary still contains raw JSON: %s", got)
+	}
+	if !strings.Contains(got, "failing tests: TestFoo") ||
+		!strings.Contains(got, "open ../external.tsv: no such file or directory") ||
+		!strings.Contains(got, "hint:") {
+		t.Fatalf("unexpected summary:\n%s", got)
+	}
+}

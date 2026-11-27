@@ -2,19 +2,28 @@ package campaign
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 
 	"github.com/t-k/targeted-mutation-go/internal/analysis"
 	"github.com/t-k/targeted-mutation-go/internal/target"
 )
 
 func previousTestSelection(ctx context.Context, cfg Config) ([]target.Replacement, []target.Package, error) {
-	files, err := previousTestFiles(ctx, cfg.Dir, cfg.Since)
-	if len(files) == 0 || err != nil {
+	testFiles, err := previousTestFiles(ctx, cfg.Dir, cfg.Since)
+	if err != nil {
 		return nil, nil, err
+	}
+	testdataFiles, err := previousTestdataFiles(ctx, cfg.Dir, cfg.Since)
+	if err != nil {
+		return nil, nil, err
+	}
+	if len(testFiles) == 0 && len(testdataFiles) == 0 {
+		return nil, nil, nil
 	}
 	cfg = selectedTestConfig(cfg)
 	packages, err := resolveTestPackages(ctx, cfg)
@@ -25,27 +34,31 @@ func previousTestSelection(ctx context.Context, cfg Config) ([]target.Replacemen
 	for _, pkg := range packages {
 		dirs[pkg.Dir] = true
 	}
-	if slices.ContainsFunc(files, func(f target.Replacement) bool { return f.Data != nil && !dirs[filepath.Dir(f.Path)] }) {
+	if slices.ContainsFunc(testFiles, func(f target.Replacement) bool { return f.Data != nil && !dirs[filepath.Dir(f.Path)] }) {
 		dir, err := os.MkdirTemp("", "tmt-previous-test-selection-")
 		if err != nil {
 			return nil, nil, err
 		}
 		defer os.RemoveAll(dir)
-		overlay, err := makeOverlay(dir, files)
+		overlay, err := makeOverlay(dir, slices.Concat(testFiles, testdataFiles))
 		if err != nil {
 			return nil, nil, err
 		}
 		prior, err := resolveTestPackages(ctx, cfg, overlay)
 		if err != nil {
 			// The old overlay will receive an explicit unconfirmed baseline verdict.
-			return files, packages, nil
+			return slices.Concat(testFiles, testdataFiles), packages, nil
 		}
 		for _, pkg := range prior {
 			dirs[pkg.Dir] = true
 		}
 	}
-	files = slices.DeleteFunc(files, func(f target.Replacement) bool { return !dirs[filepath.Dir(f.Path)] })
-	return files, packages, nil
+	testFiles = slices.DeleteFunc(testFiles, func(f target.Replacement) bool { return !dirs[filepath.Dir(f.Path)] })
+	testdataFiles = slices.DeleteFunc(testdataFiles, func(f target.Replacement) bool {
+		owner, ok := testdataOwnerDir(f.Path)
+		return !ok || !dirs[owner]
+	})
+	return slices.Concat(testFiles, testdataFiles), packages, nil
 }
 
 func selectedTestConfig(cfg Config) Config {
@@ -96,7 +109,7 @@ func (s *session) comparePrevious(ctx context.Context, report *Report, changed t
 		s.uncheckedPrevious(report, files[0].Path, "could not load previous test packages: "+err.Error())
 		return nil
 	}
-	if err := prior.setVirtualDirs(); err != nil {
+	if err := prior.setVirtualDirs(ctx, files); err != nil {
 		return err
 	}
 	base := prior.goTest(ctx, baselineOverlay, s.testPatterns()...)
@@ -105,7 +118,7 @@ func (s *session) comparePrevious(ctx context.Context, report *Report, changed t
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		s.uncheckedPrevious(report, files[0].Path, fmt.Sprintf("previous tests did not pass on the current source (%s)\n%s", base.kind, base.detail))
+		s.uncheckedPrevious(report, files[0].Path, summarizePreviousTestFailure(base.kind, base.detail))
 		return nil
 	}
 	var priorReached [][]*consumer
@@ -208,25 +221,130 @@ func isIncompleteVerdict(status string) bool {
 	return !isGapStatus(status)
 }
 
-// Go overlays can expose a package whose directory was deleted, but an executable
-// cannot enter a virtual directory. Give it a private physical directory instead.
-func (s *session) setVirtualDirs() error {
+// Go overlays can expose a package whose directory was deleted, and tests may
+// open files under testdata/ relative to the package directory. Give deleted
+// packages and packages with changed testdata/ a private physical execution
+// directory populated with the base revision's Git-tracked testdata/.
+func (s *session) setVirtualDirs(ctx context.Context, files []target.Replacement) error {
+	changedTestdata := make(map[string]bool)
+	for _, f := range files {
+		if owner, ok := testdataOwnerDir(f.Path); ok {
+			changedTestdata[owner] = true
+		}
+	}
 	for _, pkg := range s.testPackages {
+		missingDir := false
 		if _, err := os.Stat(pkg.Dir); err != nil {
 			if !os.IsNotExist(err) {
 				return err
 			}
-			dir, err := os.MkdirTemp(s.scratch, "virtual-test-package-")
-			if err != nil {
+			missingDir = true
+		}
+		if !missingDir && !changedTestdata[pkg.Dir] {
+			continue
+		}
+		dir, err := os.MkdirTemp(s.scratch, "virtual-test-package-")
+		if err != nil {
+			return err
+		}
+		if s.cfg.Since != "" {
+			if _, err := restorePreviousTestdata(ctx, s.cfg.Dir, s.cfg.Since, pkg.Dir, dir); err != nil {
 				return err
 			}
-			if s.virtualDirs == nil {
-				s.virtualDirs = make(map[string]string)
-			}
-			s.virtualDirs[pkg.Path] = dir
 		}
+		if s.virtualDirs == nil {
+			s.virtualDirs = make(map[string]string)
+		}
+		s.virtualDirs[pkg.Path] = dir
 	}
 	return nil
+}
+
+func summarizePreviousTestFailure(kind, detail string) string {
+	header := fmt.Sprintf("previous tests did not pass on the current source (%s)", kind)
+	if strings.TrimSpace(detail) == "" {
+		return header
+	}
+	type testEvent struct {
+		Action  string `json:"Action"`
+		Package string `json:"Package"`
+		Test    string `json:"Test"`
+		Output  string `json:"Output"`
+	}
+	var failedTests []string
+	outputsByTest := make(map[string][]string)
+	var pkgOutputs []string
+	parsedAny := false
+	for line := range strings.SplitSeq(detail, "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "{") {
+			continue
+		}
+		var ev testEvent
+		if json.Unmarshal([]byte(line), &ev) != nil || ev.Action == "" {
+			continue
+		}
+		parsedAny = true
+		switch ev.Action {
+		case "fail":
+			if ev.Test != "" && !slices.Contains(failedTests, ev.Test) {
+				failedTests = append(failedTests, ev.Test)
+			}
+		case "output":
+			msg := strings.TrimSpace(ev.Output)
+			if msg == "" || strings.HasPrefix(msg, "=== RUN") || strings.HasPrefix(msg, "=== PAUSE") ||
+				strings.HasPrefix(msg, "=== CONT") || strings.HasPrefix(msg, "--- PASS") ||
+				strings.HasPrefix(msg, "--- FAIL") || strings.HasPrefix(msg, "--- SKIP") ||
+				msg == "FAIL" || msg == "PASS" || strings.HasPrefix(msg, "FAIL\t") ||
+				strings.HasPrefix(msg, "ok\t") || strings.HasPrefix(msg, "?\t") {
+				continue
+			}
+			if ev.Test != "" {
+				outputsByTest[ev.Test] = append(outputsByTest[ev.Test], msg)
+			} else {
+				pkgOutputs = append(pkgOutputs, msg)
+			}
+		}
+	}
+	if !parsedAny {
+		return header + "\n" + strings.TrimSpace(detail)
+	}
+	var b strings.Builder
+	b.WriteString(header)
+	missingFixture := false
+	if len(failedTests) > 0 {
+		fmt.Fprintf(&b, "\nfailing tests: %s", strings.Join(failedTests, ", "))
+		shown := 0
+		for _, name := range failedTests {
+			for _, msg := range outputsByTest[name] {
+				if shown < 8 {
+					fmt.Fprintf(&b, "\n%s: %s", name, msg)
+					shown++
+				}
+				if looksLikeMissingFile(msg) {
+					missingFixture = true
+				}
+			}
+		}
+	} else if len(pkgOutputs) > 0 {
+		for _, msg := range pkgOutputs[:min(8, len(pkgOutputs))] {
+			fmt.Fprintf(&b, "\n%s", msg)
+			if looksLikeMissingFile(msg) {
+				missingFixture = true
+			}
+		}
+	}
+	if missingFixture {
+		b.WriteString("\nhint: previous tests could not open a required file; Git-tracked files under package testdata/ are restored automatically, while untracked or outside-package fixtures must exist on disk")
+	}
+	return b.String()
+}
+
+func looksLikeMissingFile(msg string) bool {
+	lower := strings.ToLower(msg)
+	return strings.Contains(lower, "no such file or directory") ||
+		strings.Contains(lower, "cannot find the file") ||
+		strings.Contains(lower, "cannot find the path")
 }
 
 func (s *session) testDirectory(pkg target.Package) string {

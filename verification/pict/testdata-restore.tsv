@@ -1,0 +1,16 @@
+TestChange	TestdataChange	Mode
+modified	deleted_file	probe
+modified	deleted_file	source
+modified	modified_file	probe
+unchanged	deleted_file	probe
+unchanged	modified_file	probe
+deleted_dir	deleted_file	probe
+unchanged	none	probe
+deleted_file	deleted_file	probe
+deleted_file	none	source
+modified	added_file	source
+deleted_file	added_file	probe
+deleted_dir	none	source
+unchanged	added_file	source
+modified	none	probe
+deleted_file	modified_file	source

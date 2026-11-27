@@ -1,0 +1,5 @@
+TestChange: modified, deleted_file, deleted_dir, unchanged
+TestdataChange: none, deleted_file, modified_file, added_file
+Mode: probe, source
+
+IF [TestChange] = "deleted_dir" THEN [TestdataChange] IN {"none", "deleted_file"};
